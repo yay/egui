@@ -1322,10 +1322,80 @@ impl GlutinWindowContext {
         self.gl_config.display().get_proc_address(addr)
     }
 
+    /// Moves the GL context away from any viewport that is about to be removed.
+    ///
+    /// Dropping a native window/surface while the GL context is still current to that surface can
+    /// crash on Windows. Before pruning stale child viewports, make the context current on a
+    /// surviving viewport, preferring the root viewport because it should stay alive for the app
+    /// lifetime. If no surviving surface exists, make the context not current.
+    fn make_removed_viewports_not_current(
+        &mut self,
+        viewport_output: &OrderedViewportIdMap<ViewportOutput>,
+    ) {
+        let Some(current_gl_context) = self.current_gl_context.as_ref() else {
+            return;
+        };
+
+        let removed_current_viewport = self.viewports.iter().any(|(id, viewport)| {
+            !viewport_output.contains_key(id)
+                && viewport
+                    .gl_surface
+                    .as_ref()
+                    .is_some_and(|gl_surface| gl_surface.is_current(current_gl_context))
+        });
+
+        if !removed_current_viewport {
+            return;
+        }
+
+        let replacement_viewport_id = self
+            .viewports
+            .get(&ViewportId::ROOT)
+            .filter(|_| viewport_output.contains_key(&ViewportId::ROOT))
+            .and_then(|viewport| viewport.gl_surface.as_ref().map(|_| ViewportId::ROOT))
+            .or_else(|| {
+                self.viewports.iter().find_map(|(id, viewport)| {
+                    (viewport_output.contains_key(id) && viewport.gl_surface.is_some())
+                        .then_some(*id)
+                })
+            });
+
+        if let Some(replacement_viewport_id) = replacement_viewport_id {
+            let Self {
+                viewports,
+                current_gl_context,
+                not_current_gl_context,
+                ..
+            } = self;
+            let replacement_surface = viewports
+                .get(&replacement_viewport_id)
+                .and_then(|viewport| viewport.gl_surface.as_ref())
+                .expect("replacement viewport was selected because it has a surface");
+            change_gl_context(
+                current_gl_context,
+                not_current_gl_context,
+                replacement_surface,
+            );
+        } else if let Some(current) = self.current_gl_context.take() {
+            match current.make_not_current() {
+                Ok(not_current) => {
+                    self.not_current_gl_context = Some(not_current);
+                }
+                Err(err) => {
+                    log::warn!(
+                        "Failed to make GL context not current before removing viewport: {err}"
+                    );
+                }
+            }
+        }
+    }
+
     pub(crate) fn remove_viewports_not_in(
         &mut self,
         viewport_output: &OrderedViewportIdMap<ViewportOutput>,
     ) {
+        self.make_removed_viewports_not_current(viewport_output);
+
         // GC old viewports
         self.viewports
             .retain(|id, _| viewport_output.contains_key(id));

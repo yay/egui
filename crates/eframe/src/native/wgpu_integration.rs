@@ -1154,9 +1154,10 @@ pub(crate) fn remove_viewports_not_in(
     let active_viewports_ids: ViewportIdSet = viewport_output.keys().copied().collect();
 
     // Prune dead viewports:
+    // Drop renderer-owned surfaces before dropping the native windows they reference.
+    painter.gc_viewports(&active_viewports_ids);
     viewports.retain(|id, _| active_viewports_ids.contains(id));
     viewport_from_window.retain(|_, id| active_viewports_ids.contains(id));
-    painter.gc_viewports(&active_viewports_ids);
 }
 
 /// Add new viewports, and update existing ones:
