@@ -169,7 +169,7 @@ impl<'app> GlowWinitApp<'app> {
         };
 
         // Creates the window - must come before we create our glow context
-        glutin_window_context.initialize_window(ViewportId::ROOT, event_loop)?;
+        glutin_window_context.initialize_window(ViewportId::ROOT, event_loop, None)?;
 
         {
             let viewport = &glutin_window_context.viewports[&ViewportId::ROOT];
@@ -1133,7 +1133,7 @@ impl GlutinWindowContext {
             focused_viewport: Some(ViewportId::ROOT),
         };
 
-        slf.initialize_window(ViewportId::ROOT, event_loop)?;
+        slf.initialize_window(ViewportId::ROOT, event_loop, None)?;
 
         Ok(slf)
     }
@@ -1147,7 +1147,15 @@ impl GlutinWindowContext {
         let viewports: Vec<ViewportId> = self.viewports.keys().copied().collect();
 
         for viewport_id in viewports {
-            if let Err(err) = self.initialize_window(viewport_id, event_loop) {
+            let parent_window = self
+                .viewports
+                .get(&viewport_id)
+                .and_then(|viewport| self.viewports.get(&viewport.ids.parent))
+                .and_then(|viewport| viewport.window.as_ref())
+                .map(Arc::clone);
+            if let Err(err) =
+                self.initialize_window(viewport_id, event_loop, parent_window.as_deref())
+            {
                 log::error!("Failed to initialize a window for viewport {viewport_id:?}: {err}");
             }
         }
@@ -1159,6 +1167,7 @@ impl GlutinWindowContext {
         &mut self,
         viewport_id: ViewportId,
         event_loop: &ActiveEventLoop,
+        parent_window: Option<&Window>,
     ) -> Result {
         profiling::function_scope!();
 
@@ -1171,9 +1180,15 @@ impl GlutinWindowContext {
             window
         } else {
             log::debug!("Creating a window for viewport {viewport_id:?}");
-            let window_attributes = egui_winit::create_winit_window_attributes(
+            let mut window_attributes = egui_winit::create_winit_window_attributes(
                 &self.egui_ctx,
                 viewport.builder.clone(),
+            );
+            configure_child_viewport_window_attributes(
+                &mut window_attributes,
+                &viewport.builder,
+                event_loop,
+                parent_window,
             );
             if window_attributes.transparent()
                 && self.gl_config.supports_transparency() == Some(false)
@@ -1395,6 +1410,50 @@ impl GlutinWindowContext {
     }
 }
 
+#[cfg(target_os = "macos")]
+#[expect(unsafe_code)]
+fn configure_child_viewport_window_attributes(
+    window_attributes: &mut winit::window::WindowAttributes,
+    viewport_builder: &ViewportBuilder,
+    event_loop: &ActiveEventLoop,
+    parent_window: Option<&Window>,
+) {
+    if let Some(idx) = viewport_builder.monitor {
+        if let Some(monitor) = event_loop.available_monitors().nth(idx) {
+            *window_attributes = std::mem::take(window_attributes)
+                .with_fullscreen(Some(winit::window::Fullscreen::Borderless(Some(monitor))));
+        } else {
+            log::warn!(
+                "ViewportBuilder::with_monitor({idx}): index out of range ({} monitors available)",
+                event_loop.available_monitors().count()
+            );
+        }
+    }
+
+    if let Some(parent_window) = parent_window {
+        match parent_window.window_handle() {
+            Ok(parent_window_handle) => {
+                *window_attributes = unsafe {
+                    std::mem::take(window_attributes)
+                        .with_parent_window(Some(parent_window_handle.as_raw()))
+                };
+            }
+            Err(error) => {
+                log::warn!("Unable to create macOS child viewport: {error}");
+            }
+        }
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn configure_child_viewport_window_attributes(
+    _window_attributes: &mut winit::window::WindowAttributes,
+    _viewport_builder: &ViewportBuilder,
+    _event_loop: &ActiveEventLoop,
+    _parent_window: Option<&Window>,
+) {
+}
+
 fn initialize_or_update_viewport(
     viewports: &mut OrderedViewportIdMap<Viewport>,
     ids: ViewportIdPair,
@@ -1489,8 +1548,15 @@ fn render_immediate_viewport(
             None,
         );
 
+        let parent_window = glutin
+            .viewports
+            .get(&viewport_id)
+            .and_then(|viewport| glutin.viewports.get(&viewport.ids.parent))
+            .and_then(|viewport| viewport.window.as_ref())
+            .map(Arc::clone);
+
         let ret = event_loop_context::with_current_event_loop(|event_loop| {
-            glutin.initialize_window(viewport_id, event_loop)
+            glutin.initialize_window(viewport_id, event_loop, parent_window.as_deref())
         });
 
         if let Some(Err(err)) = ret {

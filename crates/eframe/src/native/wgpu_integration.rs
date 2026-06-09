@@ -143,12 +143,23 @@ impl<'app> WgpuWinitApp<'app> {
             ..
         } = &mut *shared;
 
-        for viewport in viewports.values_mut() {
+        let viewport_ids: Vec<ViewportId> = viewports.keys().copied().collect();
+
+        for viewport_id in viewport_ids {
+            let parent_window = viewports
+                .get(&viewport_id)
+                .and_then(|viewport| viewports.get(&viewport.ids.parent))
+                .and_then(|viewport| viewport.window.as_ref())
+                .map(Arc::clone);
+            let viewport = viewports
+                .get_mut(&viewport_id)
+                .expect("viewport id was just collected and must still exist");
             viewport.initialize_window(
                 event_loop,
                 &running.integration.egui_ctx,
                 viewport_from_window,
                 painter,
+                parent_window.as_deref(),
             );
         }
     }
@@ -171,7 +182,7 @@ impl<'app> WgpuWinitApp<'app> {
             None,
             painter,
         )
-        .initialize_window(event_loop, egui_ctx, viewport_from_window, painter);
+        .initialize_window(event_loop, egui_ctx, viewport_from_window, painter, None);
     }
 
     #[cfg(target_os = "android")]
@@ -961,6 +972,7 @@ impl Viewport {
         egui_ctx: &egui::Context,
         windows_id: &mut HashMap<WindowId, ViewportId>,
         painter: &mut egui_wgpu::winit::Painter,
+        parent_window: Option<&Window>,
     ) {
         if self.window.is_some() {
             return; // we already have one
@@ -970,7 +982,7 @@ impl Viewport {
 
         let viewport_id = self.ids.this;
 
-        match egui_winit::create_window(egui_ctx, event_loop, &self.builder) {
+        match create_native_viewport_window(egui_ctx, event_loop, &self.builder, parent_window) {
             Ok(window) => {
                 windows_id.insert(window.id(), viewport_id);
 
@@ -999,6 +1011,57 @@ impl Viewport {
             }
         }
     }
+}
+
+#[cfg(target_os = "macos")]
+#[expect(unsafe_code)]
+fn create_native_viewport_window(
+    egui_ctx: &egui::Context,
+    event_loop: &ActiveEventLoop,
+    viewport_builder: &ViewportBuilder,
+    parent_window: Option<&Window>,
+) -> Result<Window, winit::error::OsError> {
+    let mut window_attributes =
+        egui_winit::create_winit_window_attributes(egui_ctx, viewport_builder.clone());
+
+    if let Some(idx) = viewport_builder.monitor {
+        if let Some(monitor) = event_loop.available_monitors().nth(idx) {
+            window_attributes = window_attributes
+                .with_fullscreen(Some(winit::window::Fullscreen::Borderless(Some(monitor))));
+        } else {
+            log::warn!(
+                "ViewportBuilder::with_monitor({idx}): index out of range ({} monitors available)",
+                event_loop.available_monitors().count()
+            );
+        }
+    }
+
+    if let Some(parent_window) = parent_window {
+        match parent_window.window_handle() {
+            Ok(parent_window_handle) => {
+                window_attributes = unsafe {
+                    window_attributes.with_parent_window(Some(parent_window_handle.as_raw()))
+                };
+            }
+            Err(error) => {
+                log::warn!("Unable to create macOS child viewport: {error}");
+            }
+        }
+    }
+
+    let window = event_loop.create_window(window_attributes)?;
+    egui_winit::apply_viewport_builder_to_window(egui_ctx, &window, viewport_builder);
+    Ok(window)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn create_native_viewport_window(
+    egui_ctx: &egui::Context,
+    event_loop: &ActiveEventLoop,
+    viewport_builder: &ViewportBuilder,
+    _parent_window: Option<&Window>,
+) -> Result<Window, winit::error::OsError> {
+    egui_winit::create_window(egui_ctx, event_loop, viewport_builder)
 }
 
 fn create_window(
@@ -1045,6 +1108,10 @@ fn render_immediate_viewport(
             ..
         } = &mut *shared.borrow_mut();
 
+        let parent_window = viewports
+            .get(&ids.parent)
+            .and_then(|viewport| viewport.window.as_ref())
+            .map(Arc::clone);
         let viewport = initialize_or_update_viewport(
             viewports,
             ids,
@@ -1055,7 +1122,13 @@ fn render_immediate_viewport(
         );
         if viewport.window.is_none() {
             event_loop_context::with_current_event_loop(|event_loop| {
-                viewport.initialize_window(event_loop, egui_ctx, viewport_from_window, painter);
+                viewport.initialize_window(
+                    event_loop,
+                    egui_ctx,
+                    viewport_from_window,
+                    painter,
+                    parent_window.as_deref(),
+                );
             });
         }
 
