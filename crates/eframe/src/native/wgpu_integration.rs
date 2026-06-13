@@ -81,6 +81,70 @@ pub struct SharedState {
     resized_viewport: Option<ViewportId>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ResizeStateTransition {
+    ended: Option<ViewportId>,
+    started: Option<ViewportId>,
+}
+
+impl ResizeStateTransition {
+    fn between(current: Option<ViewportId>, next: Option<ViewportId>) -> Self {
+        if current == next {
+            Self {
+                ended: None,
+                started: None,
+            }
+        } else {
+            Self {
+                ended: current,
+                started: next,
+            }
+        }
+    }
+}
+
+impl SharedState {
+    /// Switches the viewport whose Metal surface is configured for AppKit live resize.
+    fn set_resized_viewport(&mut self, next: Option<ViewportId>) {
+        let transition = ResizeStateTransition::between(self.resized_viewport, next);
+
+        if let Some(viewport_id) = transition.ended {
+            self.painter
+                .on_window_resize_state_change(viewport_id, false);
+        }
+        if let Some(viewport_id) = transition.started {
+            self.painter
+                .on_window_resize_state_change(viewport_id, true);
+        }
+
+        self.resized_viewport = next;
+    }
+
+    /// Finalizes renderer resize state once AppKit reports that live resize has ended.
+    #[cfg(target_os = "macos")]
+    fn finish_ended_live_resize(&mut self) {
+        let Some(viewport_id) = self.resized_viewport else {
+            return;
+        };
+
+        let is_live_resizing = self
+            .viewports
+            .get(&viewport_id)
+            .and_then(|viewport| viewport.window.as_deref())
+            .is_some_and(window_is_live_resizing);
+
+        if !is_live_resizing {
+            self.set_resized_viewport(None);
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn window_is_live_resizing(window: &Window) -> bool {
+    use winit::platform::macos::WindowExtMacOS as _;
+    window.is_live_resizing()
+}
+
 pub type Viewports = egui::OrderedViewportIdMap<Viewport>;
 
 pub struct Viewport {
@@ -602,6 +666,9 @@ impl WgpuWinitRunning<'_> {
             profiling::scope!("Prepare");
             let mut shared_lock = shared.borrow_mut();
 
+            #[cfg(target_os = "macos")]
+            shared_lock.finish_ended_live_resize();
+
             let SharedState {
                 viewports, painter, ..
             } = &mut *shared_lock;
@@ -838,27 +905,18 @@ impl WgpuWinitRunning<'_> {
         // See: https://github.com/emilk/egui/issues/903
         let mut repaint_asap = false;
 
-        // On MacOS the asap repaint is not enough. The drawn frames must be synchronized with
-        // the CoreAnimation transactions driving the window resize process.
-        //
-        // Thus, Painter, responsible for wgpu surfaces and their resize, has to be notified of the
-        // resize lifecycle, yet winit does not provide any events for that. To work around,
-        // the last resized viewport is tracked until a later event outside the live resize stream
-        // is received.
-        //
-        // AppKit can emit `Moved` events during top/left live resize because the window origin
-        // changes along with the content size. Treat those as part of live resize on macOS.
-        //
-        // See: https://github.com/emilk/egui/issues/903
-        let event_keeps_resize_active = matches!(event, winit::event::WindowEvent::Resized(_))
-            || (cfg!(target_os = "macos") && matches!(event, winit::event::WindowEvent::Moved(_)));
+        // On macOS the drawn frames must be synchronized with the CoreAnimation transactions
+        // driving an actual AppKit live resize. Initial and programmatic `Resized` events are not
+        // live resizes and must not enable transaction presentation.
+        #[cfg(target_os = "macos")]
+        shared.finish_ended_live_resize();
 
-        if !event_keeps_resize_active
+        #[cfg(not(target_os = "macos"))]
+        if !matches!(event, winit::event::WindowEvent::Resized(_))
             && let Some(id) = viewport_id
             && shared.resized_viewport == viewport_id
         {
-            shared.painter.on_window_resize_state_change(id, false);
-            shared.resized_viewport = None;
+            shared.set_resized_viewport(None);
         }
 
         match event {
@@ -889,10 +947,22 @@ impl WgpuWinitRunning<'_> {
                         NonZeroU32::new(physical_size.height),
                     )
                 {
-                    if shared.resized_viewport != viewport_id {
-                        shared.resized_viewport = viewport_id;
-                        shared.painter.on_window_resize_state_change(id, true);
+                    #[cfg(target_os = "macos")]
+                    let should_mark_resizing = shared
+                        .viewports
+                        .get(&id)
+                        .and_then(|viewport| viewport.window.as_deref())
+                        .is_some_and(window_is_live_resizing);
+
+                    #[cfg(not(target_os = "macos"))]
+                    let should_mark_resizing = true;
+
+                    if should_mark_resizing {
+                        shared.set_resized_viewport(Some(id));
+                    } else if shared.resized_viewport == Some(id) {
+                        shared.set_resized_viewport(None);
                     }
+
                     shared.painter.on_window_resized(id, width, height);
                     repaint_asap = true;
                 }
@@ -1282,5 +1352,63 @@ fn initialize_or_update_viewport<'a>(
 
             entry.into_mut()
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ResizeStateTransition, ViewportId};
+
+    #[test]
+    fn resize_state_transition_starts_resize() {
+        let viewport_id = ViewportId::from_hash_of("viewport");
+
+        assert_eq!(
+            ResizeStateTransition::between(None, Some(viewport_id)),
+            ResizeStateTransition {
+                ended: None,
+                started: Some(viewport_id),
+            }
+        );
+    }
+
+    #[test]
+    fn resize_state_transition_finishes_resize() {
+        let viewport_id = ViewportId::from_hash_of("viewport");
+
+        assert_eq!(
+            ResizeStateTransition::between(Some(viewport_id), None),
+            ResizeStateTransition {
+                ended: Some(viewport_id),
+                started: None,
+            }
+        );
+    }
+
+    #[test]
+    fn resize_state_transition_switches_viewport() {
+        let first = ViewportId::from_hash_of("first");
+        let second = ViewportId::from_hash_of("second");
+
+        assert_eq!(
+            ResizeStateTransition::between(Some(first), Some(second)),
+            ResizeStateTransition {
+                ended: Some(first),
+                started: Some(second),
+            }
+        );
+    }
+
+    #[test]
+    fn resize_state_transition_ignores_unchanged_state() {
+        let viewport_id = ViewportId::from_hash_of("viewport");
+
+        assert_eq!(
+            ResizeStateTransition::between(Some(viewport_id), Some(viewport_id)),
+            ResizeStateTransition {
+                ended: None,
+                started: None,
+            }
+        );
     }
 }
