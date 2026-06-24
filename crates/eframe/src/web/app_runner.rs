@@ -88,7 +88,7 @@ impl AppRunner {
                 user_agent: super::user_agent().unwrap_or_default(),
                 location: super::web_location(),
             },
-            cpu_usage: None,
+            viewport_cpu_usage: Default::default(),
         };
         let storage = LocalStorage::default();
 
@@ -356,7 +356,24 @@ impl AppRunner {
     }
 
     pub fn report_frame_time(&mut self, cpu_usage_seconds: f32) {
-        self.frame.info.cpu_usage = Some(cpu_usage_seconds);
+        let report_time = now_sec();
+        self.frame.info.viewport_cpu_usage.insert(
+            egui::ViewportId::ROOT,
+            epi::ViewportCpuUsage {
+                cpu_usage: cpu_usage_seconds,
+                time: report_time,
+                cumulative_frame_nr: self
+                    .egui_ctx
+                    .cumulative_frame_nr_for(egui::ViewportId::ROOT),
+            },
+        );
+        epi::publish_viewport_cpu_usage(&self.egui_ctx, &self.frame.info.viewport_cpu_usage);
+
+        if let Some(target) = epi::viewport_cpu_usage_repaint_target(&self.egui_ctx)
+            && target != egui::ViewportId::ROOT
+        {
+            self.egui_ctx.request_repaint_of(target);
+        }
     }
 
     fn handle_platform_output(&self, platform_output: egui::PlatformOutput) {

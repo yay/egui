@@ -59,8 +59,13 @@ pub struct BackendPanel {
 
 impl BackendPanel {
     pub fn update(&mut self, ctx: &egui::Context, frame: &eframe::Frame) {
+        let root_cpu_usage = frame
+            .info()
+            .viewport_cpu_usage
+            .get(&egui::ViewportId::ROOT)
+            .map(|sample| sample.cpu_usage);
         self.frame_history
-            .on_new_frame(ctx.input(|i| i.time), frame.info().cpu_usage);
+            .on_new_frame(ctx.input(|i| i.time), root_cpu_usage);
 
         match self.run_mode {
             RunMode::Continuous => {

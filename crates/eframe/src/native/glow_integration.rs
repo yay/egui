@@ -27,7 +27,7 @@ use winit::{
 use ahash::HashMap;
 use egui::{
     DeferredViewportUiCallback, ImmediateViewport, OrderedViewportIdMap, ViewportBuilder,
-    ViewportClass, ViewportId, ViewportIdPair, ViewportInfo, ViewportOutput,
+    ViewportClass, ViewportId, ViewportIdPair, ViewportIdSet, ViewportInfo, ViewportOutput,
 };
 #[cfg(feature = "accesskit")]
 use egui_winit::accesskit_winit;
@@ -661,6 +661,7 @@ impl GlowWinitRunning<'_> {
             pixels_per_point,
             viewport_output,
         } = full_output;
+        let active_viewports_ids: ViewportIdSet = viewport_output.keys().copied().collect();
 
         glutin.remove_viewports_not_in(&viewport_output);
 
@@ -767,7 +768,8 @@ impl GlowWinitRunning<'_> {
 
         glutin.handle_viewport_output(event_loop, &integration.egui_ctx, &viewport_output);
 
-        integration.report_frame_time(frame_timer.total_time_sec()); // don't count auto-save time as part of regular frame time
+        integration.report_frame_time(viewport_id, frame_timer.total_time_sec()); // don't count auto-save time as part of regular frame time
+        integration.retain_viewport_cpu_usage(&active_viewports_ids);
 
         integration.maybe_autosave(app.as_mut(), Some(&window));
 

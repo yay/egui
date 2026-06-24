@@ -887,6 +887,75 @@ pub struct Location {
     pub origin: String,
 }
 
+/// CPU usage reported for one viewport frame.
+#[derive(Clone, Copy, Debug)]
+pub struct ViewportCpuUsage {
+    /// Seconds of cpu usage on this viewport frame.
+    ///
+    /// This includes [`App::ui`] or the viewport callback as well as rendering
+    /// (except for vsync waiting).
+    pub cpu_usage: f32,
+
+    /// Egui-clock time, in seconds, when this usage was reported.
+    ///
+    /// This is measured at the frame-time report point, not at egui pass input time, so multiple
+    /// viewports rendered in one event-loop turn still get distinct report timestamps.
+    pub time: f64,
+
+    /// Egui frame number for the viewport after the measured frame.
+    pub cumulative_frame_nr: u64,
+}
+
+const VIEWPORT_CPU_USAGE_ID: &str = "eframe_viewport_cpu_usage";
+const VIEWPORT_CPU_USAGE_REPAINT_TARGET_ID: &str = "eframe_viewport_cpu_usage_repaint_target";
+
+/// Returns the most recently reported CPU usage for each active viewport.
+///
+/// A viewport is only included after it has completed and reported at least one frame.
+///
+/// This can be read from any viewport through its [`egui::Context`], including deferred viewport
+/// callbacks that do not receive an [`eframe::Frame`](crate::Frame).
+pub fn viewport_cpu_usage(ctx: &egui::Context) -> egui::OrderedViewportIdMap<ViewportCpuUsage> {
+    ctx.data(|data| {
+        data.get_temp(egui::Id::new(VIEWPORT_CPU_USAGE_ID))
+            .unwrap_or_default()
+    })
+}
+
+/// Configures a viewport that should repaint when another viewport reports new CPU usage.
+///
+/// Eframe will not request a repaint when the reported viewport is the target itself. This lets a
+/// diagnostics viewport observe its own CPU usage without creating a self-repaint loop.
+pub fn set_viewport_cpu_usage_repaint_target(
+    ctx: &egui::Context,
+    target: Option<egui::ViewportId>,
+) {
+    ctx.data_mut(|data| {
+        data.insert_temp(egui::Id::new(VIEWPORT_CPU_USAGE_REPAINT_TARGET_ID), target);
+    });
+}
+
+pub(crate) fn publish_viewport_cpu_usage(
+    ctx: &egui::Context,
+    viewport_cpu_usage: &egui::OrderedViewportIdMap<ViewportCpuUsage>,
+) {
+    ctx.data_mut(|data| {
+        data.insert_temp(
+            egui::Id::new(VIEWPORT_CPU_USAGE_ID),
+            viewport_cpu_usage.clone(),
+        );
+    });
+}
+
+pub(crate) fn viewport_cpu_usage_repaint_target(ctx: &egui::Context) -> Option<egui::ViewportId> {
+    ctx.data(|data| {
+        data.get_temp::<Option<egui::ViewportId>>(egui::Id::new(
+            VIEWPORT_CPU_USAGE_REPAINT_TARGET_ID,
+        ))
+        .flatten()
+    })
+}
+
 /// Information about the integration passed to the use app each frame.
 #[derive(Clone, Debug)]
 pub struct IntegrationInfo {
@@ -894,14 +963,14 @@ pub struct IntegrationInfo {
     #[cfg(target_arch = "wasm32")]
     pub web_info: WebInfo,
 
-    /// Seconds of cpu usage (in seconds) on the previous frame.
+    /// Seconds of cpu usage by viewport for the most recently reported frame of each viewport.
     ///
-    /// This includes [`App::ui`] as well as rendering (except for vsync waiting).
+    /// Each sample includes [`App::ui`] or the viewport callback as well as rendering
+    /// (except for vsync waiting).
     ///
-    /// For a more detailed view of cpu usage, connect your preferred profiler by enabling it's feature in [`profiling`](https://crates.io/crates/profiling).
-    ///
-    /// `None` if this is the first frame.
-    pub cpu_usage: Option<f32>,
+    /// For a more detailed view of cpu usage, connect your preferred profiler
+    /// by enabling it's feature in [`profiling`](https://crates.io/crates/profiling).
+    pub viewport_cpu_usage: egui::OrderedViewportIdMap<ViewportCpuUsage>,
 }
 
 impl IntegrationInfo {
@@ -922,7 +991,7 @@ impl IntegrationInfo {
                     origin: "http://localhost".to_owned(),
                 },
             },
-            cpu_usage: None,
+            viewport_cpu_usage: Default::default(),
         }
     }
 }

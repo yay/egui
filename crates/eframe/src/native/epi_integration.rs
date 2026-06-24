@@ -7,7 +7,7 @@ use winit::event_loop::ActiveEventLoop;
 
 use raw_window_handle::{HasDisplayHandle as _, HasWindowHandle as _};
 
-use egui::{DeferredViewportUiCallback, ViewportBuilder, ViewportId};
+use egui::{DeferredViewportUiCallback, ViewportBuilder, ViewportId, ViewportIdSet};
 use egui_winit::{EventResponse, WindowSettings};
 
 use crate::epi;
@@ -184,7 +184,9 @@ impl EpiIntegration {
         >,
     ) -> Self {
         let frame = epi::Frame {
-            info: epi::IntegrationInfo { cpu_usage: None },
+            info: epi::IntegrationInfo {
+                viewport_cpu_usage: Default::default(),
+            },
             storage,
             #[cfg(feature = "glow")]
             gl,
@@ -315,8 +317,31 @@ impl EpiIntegration {
         std::mem::take(&mut self.pending_full_output)
     }
 
-    pub fn report_frame_time(&mut self, seconds: f32) {
-        self.frame.info.cpu_usage = Some(seconds);
+    pub fn report_frame_time(&mut self, viewport_id: ViewportId, seconds: f32) {
+        let report_time = self.beginning.elapsed().as_secs_f64();
+        self.frame.info.viewport_cpu_usage.insert(
+            viewport_id,
+            epi::ViewportCpuUsage {
+                cpu_usage: seconds,
+                time: report_time,
+                cumulative_frame_nr: self.egui_ctx.cumulative_frame_nr_for(viewport_id),
+            },
+        );
+        epi::publish_viewport_cpu_usage(&self.egui_ctx, &self.frame.info.viewport_cpu_usage);
+
+        if let Some(target) = epi::viewport_cpu_usage_repaint_target(&self.egui_ctx)
+            && target != viewport_id
+        {
+            self.egui_ctx.request_repaint_of(target);
+        }
+    }
+
+    pub fn retain_viewport_cpu_usage(&mut self, active_viewports: &ViewportIdSet) {
+        self.frame
+            .info
+            .viewport_cpu_usage
+            .retain(|viewport_id, _| active_viewports.contains(viewport_id));
+        epi::publish_viewport_cpu_usage(&self.egui_ctx, &self.frame.info.viewport_cpu_usage);
     }
 
     pub fn post_rendering(&mut self, window: &winit::window::Window) {
