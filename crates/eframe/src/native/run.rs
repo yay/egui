@@ -3,7 +3,7 @@ use std::time::{Duration, Instant};
 use winit::{
     application::ApplicationHandler,
     event_loop::{ActiveEventLoop, ControlFlow, EventLoop},
-    window::WindowId,
+    window::{Window, WindowId},
 };
 
 use ahash::HashMap;
@@ -188,7 +188,7 @@ impl<T: WinitApp> WinitAppWrapper<T> {
     fn check_redraw_requests(&mut self, event_loop: &ActiveEventLoop) {
         let now = Instant::now();
 
-        let mut invisible_window_ids = Vec::new();
+        let mut direct_repaint_window_ids = Vec::new();
 
         self.windows_next_repaint_times
             .retain(|window_id, repaint_time| {
@@ -197,13 +197,14 @@ impl<T: WinitApp> WinitAppWrapper<T> {
                 }
 
                 if let Some(window) = self.winit_app.window(*window_id) {
-                    // On Windows, invisible windows don't receive RedrawRequested
-                    // events, so pending viewport commands (e.g. Visible(true)) would
-                    // never be processed. We collect these windows to paint them
-                    // directly below.
+                    let direct = should_repaint_directly(&window);
+
+                    // Some native windows don't receive RedrawRequested events after
+                    // request_redraw, so pending viewport commands and input would never be
+                    // processed. We collect these windows to paint them directly below.
                     // See: https://github.com/emilk/egui/issues/5229
-                    if is_invisible_or_minimized(&window) {
-                        invisible_window_ids.push(*window_id);
+                    if direct {
+                        direct_repaint_window_ids.push(*window_id);
                     } else {
                         log::trace!("request_redraw for {window_id:?}");
                         event_loop.set_control_flow(ControlFlow::Poll);
@@ -215,10 +216,9 @@ impl<T: WinitApp> WinitAppWrapper<T> {
                 false
             });
 
-        // Paint invisible windows directly, since they won't receive
-        // RedrawRequested events on Windows. This ensures that viewport
-        // commands like Visible(true) are still processed.
-        for window_id in &invisible_window_ids {
+        // Paint windows that won't deliver RedrawRequested directly. This ensures that viewport
+        // commands like Visible(true), and input on macOS fullscreen windows, are still processed.
+        for window_id in &direct_repaint_window_ids {
             let event_result = self.winit_app.run_ui_and_paint(event_loop, *window_id);
             self.handle_event_result(event_loop, event_result);
         }
@@ -227,9 +227,9 @@ impl<T: WinitApp> WinitAppWrapper<T> {
         // to avoid busy-looping. If no repaint was requested by the app,
         // the window will simply sleep.
         // See: https://github.com/emilk/egui/issues/7776
-        if !invisible_window_ids.is_empty() {
+        if !direct_repaint_window_ids.is_empty() {
             let next_paint = Instant::now() + INVISIBLE_WINDOW_REPAINT_INTERVAL;
-            for window_id in &invisible_window_ids {
+            for window_id in &direct_repaint_window_ids {
                 self.windows_next_repaint_times
                     .entry(*window_id)
                     .and_modify(|t| *t = (*t).min(next_paint));
@@ -368,6 +368,14 @@ impl<T: WinitApp> ApplicationHandler<UserEvent> for WinitAppWrapper<T> {
             self.handle_event_result(event_loop, event_result);
         });
     }
+}
+
+fn should_repaint_directly(window: &Window) -> bool {
+    is_invisible_or_minimized(window) || is_macos_fullscreen(window)
+}
+
+fn is_macos_fullscreen(window: &Window) -> bool {
+    cfg!(target_os = "macos") && window.fullscreen().is_some()
 }
 
 #[cfg(not(target_os = "ios"))]
