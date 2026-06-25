@@ -34,7 +34,10 @@ use egui_winit::accesskit_winit;
 
 use crate::{
     App, AppCreator, CreationContext, NativeOptions, Result, Storage,
-    native::{epi_integration::EpiIntegration, winit_integration::is_invisible_or_minimized},
+    native::{
+        epi_integration::EpiIntegration,
+        winit_integration::{is_invisible_or_minimized, should_render_viewport},
+    },
 };
 
 use super::{
@@ -566,7 +569,7 @@ impl GlowWinitRunning<'_> {
             };
             egui_winit::update_viewport_info(&mut viewport.info, &egui_ctx, window, false);
 
-            let is_visible = viewport.info.visible().unwrap_or(true);
+            let is_visible = should_render_viewport(&viewport.info);
 
             let Some(egui_winit) = viewport.egui_winit.as_mut() else {
                 return Ok(EventResult::Wait);
@@ -661,8 +664,6 @@ impl GlowWinitRunning<'_> {
             pixels_per_point,
             viewport_output,
         } = full_output;
-
-        glutin.remove_viewports_not_in(&viewport_output);
 
         let GlutinWindowContext {
             viewports,
@@ -765,7 +766,12 @@ impl GlowWinitRunning<'_> {
             }
         }
 
-        glutin.handle_viewport_output(event_loop, &integration.egui_ctx, &viewport_output);
+        glutin.handle_viewport_output(
+            event_loop,
+            &integration.egui_ctx,
+            &viewport_output,
+            viewport_id == ViewportId::ROOT && is_visible,
+        );
 
         integration.report_frame_time(frame_timer.total_time_sec()); // don't count auto-save time as part of regular frame time
 
@@ -1410,6 +1416,7 @@ impl GlutinWindowContext {
         event_loop: &ActiveEventLoop,
         egui_ctx: &egui::Context,
         viewport_output: &OrderedViewportIdMap<ViewportOutput>,
+        prune_missing: bool,
     ) {
         profiling::function_scope!();
 
@@ -1461,7 +1468,12 @@ impl GlutinWindowContext {
         // Create windows for any new viewports:
         self.initialize_all_windows(event_loop);
 
-        self.remove_viewports_not_in(viewport_output);
+        // Only a visible root pass is authoritative for removing deferred native viewports. Child
+        // passes, and passes where UI was skipped because the window is invisible, may have partial
+        // viewport output during native window transitions.
+        if prune_missing {
+            self.remove_viewports_not_in(viewport_output);
+        }
     }
 }
 
@@ -1507,7 +1519,11 @@ fn initialize_or_update_viewport(
 
             viewport.ids.parent = ids.parent;
             viewport.class = class;
-            viewport.viewport_ui_cb = viewport_ui_cb;
+            // Child viewport passes can report an existing deferred viewport without its
+            // root-owned callback. Keep the callback so direct repaints still run that viewport.
+            if viewport_ui_cb.is_some() || viewport.viewport_ui_cb.is_none() {
+                viewport.viewport_ui_cb = viewport_ui_cb;
+            }
 
             let (mut delta_commands, recreate) = viewport.builder.patch(builder);
 
@@ -1670,7 +1686,7 @@ fn render_immediate_viewport(
     egui_winit.handle_platform_output(window, platform_output);
 
     event_loop_context::with_current_event_loop(|event_loop| {
-        glutin.handle_viewport_output(event_loop, egui_ctx, &viewport_output);
+        glutin.handle_viewport_output(event_loop, egui_ctx, &viewport_output, false);
     });
 }
 
