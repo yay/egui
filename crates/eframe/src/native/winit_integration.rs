@@ -17,6 +17,16 @@ pub fn is_invisible_or_minimized(window: &Window) -> bool {
     window.is_visible() == Some(false) || window.is_minimized() == Some(true)
 }
 
+/// Returns `true` when a native viewport should run UI and paint.
+///
+/// This mostly follows [`egui::ViewportInfo::visible`], but treats fullscreen windows as visible
+/// even when the platform reports them as occluded. On macOS, native fullscreen Space transitions
+/// can leave a focused fullscreen window reported as occluded while it is still receiving input.
+pub fn should_render_viewport(info: &egui::ViewportInfo) -> bool {
+    info.minimized != Some(true)
+        && (info.fullscreen == Some(true) || info.visible().unwrap_or(true))
+}
+
 /// Create an egui context, restoring it from storage if possible.
 pub fn create_egui_context(storage: Option<&dyn crate::Storage>) -> egui::Context {
     profiling::function_scope!();

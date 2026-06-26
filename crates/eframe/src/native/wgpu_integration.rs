@@ -29,7 +29,7 @@ use crate::{
     App, AppCreator, CreationContext, NativeOptions, Result, Storage,
     native::{
         epi_integration::EpiIntegration,
-        winit_integration::{EventResult, is_invisible_or_minimized},
+        winit_integration::{EventResult, is_invisible_or_minimized, should_render_viewport},
     },
 };
 
@@ -79,6 +79,7 @@ pub struct SharedState {
     viewport_from_window: HashMap<WindowId, ViewportId>,
     focused_viewport: Option<ViewportId>,
     resized_viewport: Option<ViewportId>,
+    resized_viewport_uses_latency_bump: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -104,43 +105,55 @@ impl ResizeStateTransition {
 }
 
 impl SharedState {
-    /// Switches the viewport whose Metal surface is configured for AppKit live resize.
-    fn set_resized_viewport(&mut self, next: Option<ViewportId>) {
+    /// Switches the viewport whose Metal surface is configured for AppKit native resize.
+    fn set_resized_viewport(&mut self, next: Option<ViewportId>, latency_bump: bool) {
         let transition = ResizeStateTransition::between(self.resized_viewport, next);
 
         if let Some(viewport_id) = transition.ended {
             self.painter
-                .on_window_resize_state_change(viewport_id, false);
+                .on_window_resize_state_change(viewport_id, false, false);
         }
         if let Some(viewport_id) = transition.started {
             self.painter
-                .on_window_resize_state_change(viewport_id, true);
+                .on_window_resize_state_change(viewport_id, true, latency_bump);
+        } else if let Some(viewport_id) = next
+            && self.resized_viewport_uses_latency_bump != latency_bump
+        {
+            self.painter
+                .on_window_resize_state_change(viewport_id, true, latency_bump);
         }
 
         self.resized_viewport = next;
+        self.resized_viewport_uses_latency_bump = next.is_some() && latency_bump;
     }
 
-    /// Finalizes renderer resize state once AppKit reports that live resize has ended.
+    /// Finalizes renderer resize state once AppKit reports that native resizing has ended.
     #[cfg(target_os = "macos")]
-    fn finish_ended_live_resize(&mut self) {
+    fn finish_ended_native_resize(&mut self) {
         let Some(viewport_id) = self.resized_viewport else {
             return;
         };
 
-        let is_live_resizing = self
+        let is_native_resizing = self
             .viewports
             .get(&viewport_id)
             .and_then(|viewport| viewport.window.as_deref())
-            .is_some_and(window_is_live_resizing);
+            .is_some_and(window_is_native_resizing);
 
-        if !is_live_resizing {
-            self.set_resized_viewport(None);
+        if !is_native_resizing {
+            self.set_resized_viewport(None, false);
         }
     }
 }
 
 #[cfg(target_os = "macos")]
-fn window_is_live_resizing(window: &Window) -> bool {
+fn window_is_native_resizing(window: &Window) -> bool {
+    use winit::platform::macos::WindowExtMacOS as _;
+    window.is_live_resizing() || window.is_fullscreen_transition()
+}
+
+#[cfg(target_os = "macos")]
+fn window_uses_resize_latency_bump(window: &Window) -> bool {
     use winit::platform::macos::WindowExtMacOS as _;
     window.is_live_resizing()
 }
@@ -399,6 +412,7 @@ impl<'app> WgpuWinitApp<'app> {
             painter,
             focused_viewport: Some(ViewportId::ROOT),
             resized_viewport: None,
+            resized_viewport_uses_latency_bump: false,
         }));
 
         {
@@ -667,7 +681,7 @@ impl WgpuWinitRunning<'_> {
             let mut shared_lock = shared.borrow_mut();
 
             #[cfg(target_os = "macos")]
-            shared_lock.finish_ended_live_resize();
+            shared_lock.finish_ended_native_resize();
 
             let SharedState {
                 viewports, painter, ..
@@ -709,7 +723,7 @@ impl WgpuWinitRunning<'_> {
             };
             egui_winit::update_viewport_info(info, &integration.egui_ctx, window, false);
 
-            let is_visible = viewport.info.visible().unwrap_or(true);
+            let is_visible = should_render_viewport(&viewport.info);
 
             {
                 profiling::scope!("set_window");
@@ -764,8 +778,6 @@ impl WgpuWinitRunning<'_> {
             pixels_per_point,
             viewport_output,
         } = full_output;
-
-        remove_viewports_not_in(viewports, painter, viewport_from_window, &viewport_output);
 
         let Some(viewport) = viewports.get_mut(&viewport_id) else {
             return Ok(EventResult::Wait);
@@ -835,10 +847,9 @@ impl WgpuWinitRunning<'_> {
 
             vsync_secs
         } else {
+            painter.update_textures(&textures_delta);
             0.0
         };
-
-        let active_viewports_ids: ViewportIdSet = viewport_output.keys().copied().collect();
 
         handle_viewport_output(
             &integration.egui_ctx,
@@ -846,12 +857,8 @@ impl WgpuWinitRunning<'_> {
             viewports,
             painter,
             viewport_from_window,
+            viewport_id == ViewportId::ROOT && is_visible,
         );
-
-        // Prune dead viewports:
-        viewports.retain(|id, _| active_viewports_ids.contains(id));
-        viewport_from_window.retain(|_, id| active_viewports_ids.contains(id));
-        painter.gc_viewports(&active_viewports_ids);
 
         let window = viewport_from_window
             .get(&window_id)
@@ -906,17 +913,18 @@ impl WgpuWinitRunning<'_> {
         let mut repaint_asap = false;
 
         // On macOS the drawn frames must be synchronized with the CoreAnimation transactions
-        // driving an actual AppKit live resize. Initial and programmatic `Resized` events are not
-        // live resizes and must not enable transaction presentation.
+        // driving actual AppKit live resize and fullscreen transitions. Initial and programmatic
+        // `Resized` events are not native resize transitions and must not enable transaction
+        // presentation.
         #[cfg(target_os = "macos")]
-        shared.finish_ended_live_resize();
+        shared.finish_ended_native_resize();
 
         #[cfg(not(target_os = "macos"))]
         if !matches!(event, winit::event::WindowEvent::Resized(_))
             && let Some(id) = viewport_id
             && shared.resized_viewport == viewport_id
         {
-            shared.set_resized_viewport(None);
+            shared.set_resized_viewport(None, false);
         }
 
         match event {
@@ -952,15 +960,23 @@ impl WgpuWinitRunning<'_> {
                         .viewports
                         .get(&id)
                         .and_then(|viewport| viewport.window.as_deref())
-                        .is_some_and(window_is_live_resizing);
+                        .is_some_and(window_is_native_resizing);
+                    #[cfg(target_os = "macos")]
+                    let latency_bump = shared
+                        .viewports
+                        .get(&id)
+                        .and_then(|viewport| viewport.window.as_deref())
+                        .is_some_and(window_uses_resize_latency_bump);
 
                     #[cfg(not(target_os = "macos"))]
                     let should_mark_resizing = true;
+                    #[cfg(not(target_os = "macos"))]
+                    let latency_bump = true;
 
                     if should_mark_resizing {
-                        shared.set_resized_viewport(Some(id));
+                        shared.set_resized_viewport(Some(id), latency_bump);
                     } else if shared.resized_viewport == Some(id) {
-                        shared.set_resized_viewport(None);
+                        shared.set_resized_viewport(None, false);
                     }
 
                     shared.painter.on_window_resized(id, width, height);
@@ -1212,6 +1228,7 @@ fn render_immediate_viewport(
         viewports,
         painter,
         viewport_from_window,
+        false,
     );
 }
 
@@ -1237,6 +1254,7 @@ fn handle_viewport_output(
     viewports: &mut Viewports,
     painter: &mut egui_wgpu::winit::Painter,
     viewport_from_window: &mut HashMap<WindowId, ViewportId>,
+    prune_missing: bool,
 ) {
     for (
         viewport_id,
@@ -1283,7 +1301,12 @@ fn handle_viewport_output(
         }
     }
 
-    remove_viewports_not_in(viewports, painter, viewport_from_window, viewport_output);
+    // Only a visible root pass is authoritative for removing deferred native viewports. Child
+    // passes, and passes where UI was skipped because the window is invisible, may have partial
+    // viewport output during native window transitions.
+    if prune_missing {
+        remove_viewports_not_in(viewports, painter, viewport_from_window, viewport_output);
+    }
 }
 
 fn initialize_or_update_viewport<'a>(
@@ -1328,7 +1351,11 @@ fn initialize_or_update_viewport<'a>(
 
             viewport.class = class;
             viewport.ids.parent = ids.parent;
-            viewport.viewport_ui_cb = viewport_ui_cb;
+            // Child viewport passes can report an existing deferred viewport without its
+            // root-owned callback. Keep the callback so direct repaints still run that viewport.
+            if viewport_ui_cb.is_some() || viewport.viewport_ui_cb.is_none() {
+                viewport.viewport_ui_cb = viewport_ui_cb;
+            }
 
             let (mut delta_commands, recreate) = viewport.builder.patch(builder);
 
