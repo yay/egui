@@ -843,6 +843,7 @@ impl WgpuWinitRunning<'_> {
 
             vsync_secs
         } else {
+            painter.update_textures(&textures_delta);
             0.0
         };
 
