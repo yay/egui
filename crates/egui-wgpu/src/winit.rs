@@ -16,6 +16,8 @@ struct SurfaceState {
     alpha_mode: wgpu::CompositeAlphaMode,
     width: u32,
     height: u32,
+    has_presented: bool,
+    presents_with_transaction: bool,
     resizing: bool,
     needs_reconfigure: bool,
     needs_recreate: bool,
@@ -104,6 +106,15 @@ impl Painter {
             desired_maximum_frame_latency,
         } = *config;
 
+        // Transaction presentation can hold a drawable during AppKit live resize. Keep the
+        // configured low-latency path normally, but use three Metal drawables while resizing.
+        #[cfg(target_os = "macos")]
+        let desired_maximum_frame_latency = if surface_state.resizing {
+            Some(desired_maximum_frame_latency.unwrap_or(2).max(2))
+        } else {
+            desired_maximum_frame_latency
+        };
+
         let width = surface_state.width;
         let height = surface_state.height;
 
@@ -150,6 +161,7 @@ impl Painter {
             viewport_id,
             old_state.width,
             old_state.height,
+            old_state.presents_with_transaction,
             old_state.resizing,
         );
         Ok(())
@@ -237,7 +249,7 @@ impl Painter {
                     .await?;
             self.render_state = Some(render_state);
         }
-        self.install_surface(surface, viewport_id, size.width, size.height, false);
+        self.install_surface(surface, viewport_id, size.width, size.height, false, false);
         Ok(())
     }
 
@@ -251,6 +263,7 @@ impl Painter {
         viewport_id: ViewportId,
         width: u32,
         height: u32,
+        presents_with_transaction: bool,
         resizing: bool,
     ) {
         let alpha_mode = {
@@ -284,6 +297,8 @@ impl Painter {
                 surface,
                 width,
                 height,
+                has_presented: false,
+                presents_with_transaction,
                 alpha_mode,
                 resizing,
                 needs_reconfigure: false,
@@ -383,28 +398,41 @@ impl Painter {
         }
     }
 
-    /// Handles changes of the resizing state.
+    /// Handles changes of the native resize presentation state.
     ///
     /// Should be called prior to the first [`Painter::on_window_resized`] call and after the last in
     /// the chain. Used to apply platform-specific logic, e.g. OSX Metal window resize jitter fix.
-    pub fn on_window_resize_state_change(&mut self, viewport_id: ViewportId, resizing: bool) {
+    pub fn on_window_resize_state_change(
+        &mut self,
+        viewport_id: ViewportId,
+        presents_with_transaction: bool,
+        latency_bump: bool,
+    ) {
         profiling::function_scope!();
 
         let Some(state) = self.surfaces.get_mut(&viewport_id) else {
             return;
         };
-        if state.resizing == resizing {
-            if resizing {
+        if state.presents_with_transaction == presents_with_transaction
+            && state.resizing == latency_bump
+        {
+            if presents_with_transaction {
                 log::debug!(
-                    "Painter::on_window_resize_state_change() redundant call while resizing"
+                    "Painter::on_window_resize_state_change() redundant call while presenting \
+                     with transaction"
                 );
             } else {
                 log::debug!(
-                    "Painter::on_window_resize_state_change() redundant call after resizing"
+                    "Painter::on_window_resize_state_change() redundant call after native resize"
                 );
             }
             return;
         }
+
+        let latency_bump_changed = state.resizing != latency_bump;
+        state.presents_with_transaction = presents_with_transaction;
+        // Set before reconfiguring so macOS live resize uses the temporary latency bump above.
+        state.resizing = latency_bump;
 
         // Resizing is a bit tricky on macOS.
         // It requires enabling ["present_with_transaction"](https://developer.apple.com/documentation/quartzcore/cametallayer/presentswithtransaction)
@@ -412,34 +440,26 @@ impl Painter {
         // is common across rendering backends, the solution for wgpu/metal is known.
         //
         // See https://github.com/emilk/egui/issues/903
-        #[cfg(all(target_os = "macos", feature = "macos-window-resize-jitter-fix"))]
+        #[cfg(target_os = "macos")]
         {
-            // setPresentsWithTransaction causes hangs when desired_maximum_frame_latency == 1
-            let is_low_latency = self
-                .render_state
-                .as_ref()
-                .is_some_and(|rs| rs.surface_config.desired_maximum_frame_latency == Some(1));
-            if !is_low_latency {
-                // SAFETY: The cast is checked with if condition. If the used backend is not metal
-                // it gracefully fails.
-                unsafe {
-                    if let Some(hal_surface) = state.surface.as_hal::<wgpu::hal::api::Metal>() {
-                        hal_surface
-                            .render_layer()
-                            .lock()
-                            .setPresentsWithTransaction(resizing);
+            // SAFETY: The cast is checked with if condition. If the used backend is not metal
+            // it gracefully fails.
+            unsafe {
+                if let (Some(render_state), Some(hal_surface)) = (
+                    self.render_state.as_ref(),
+                    state.surface.as_hal::<wgpu::hal::api::Metal>(),
+                ) {
+                    hal_surface
+                        .render_layer()
+                        .lock()
+                        .setPresentsWithTransaction(presents_with_transaction);
 
-                        Self::configure_surface(
-                            state,
-                            self.render_state.as_ref().unwrap(),
-                            &self.config.surface,
-                        );
+                    if latency_bump_changed {
+                        Self::configure_surface(state, render_state, &self.config.surface);
                     }
                 }
             }
         }
-
-        state.resizing = resizing;
     }
 
     pub fn on_window_resized(
@@ -617,6 +637,12 @@ impl Painter {
                     }
                     SurfaceErrorAction::SkipFrame => {}
                 }
+                // eframe initially hides native windows until this method returns. If the first
+                // surface acquisition fails, ensure showing that window is followed by another
+                // paint instead of leaving it permanently blank.
+                if !surface_state.has_presented {
+                    self.context.request_repaint_of(viewport_id);
+                }
                 return vsync_sec;
             }
         };
@@ -760,6 +786,7 @@ impl Painter {
             output_frame.present();
             vsync_sec += start.elapsed().as_secs_f32();
         }
+        surface_state.has_presented = true;
 
         vsync_sec
     }

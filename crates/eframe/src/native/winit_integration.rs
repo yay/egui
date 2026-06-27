@@ -17,6 +17,85 @@ pub fn is_invisible_or_minimized(window: &Window) -> bool {
     window.is_visible() == Some(false) || window.is_minimized() == Some(true)
 }
 
+/// Returns `true` when a native viewport should run UI and paint.
+///
+/// This follows [`egui::ViewportInfo::visible`] except on macOS, where a focused fullscreen window
+/// can transiently be reported as occluded while still receiving input. Native fullscreen
+/// transitions are also kept renderable because focus and fullscreen reporting can lag behind the
+/// AppKit transition state.
+pub fn should_render_viewport(info: &egui::ViewportInfo, window: &Window) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        use winit::platform::macos::WindowExtMacOS as _;
+        should_render_macos_viewport(info, window.is_fullscreen_transition())
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = window;
+        info.visible().unwrap_or(true)
+    }
+}
+
+/// Applies the macOS visibility exceptions using the supplied native transition state.
+#[cfg(any(target_os = "macos", test))]
+fn should_render_macos_viewport(info: &egui::ViewportInfo, is_fullscreen_transition: bool) -> bool {
+    info.minimized != Some(true)
+        && (info.visible().unwrap_or(true)
+            || (info.fullscreen == Some(true) && info.focused == Some(true))
+            || is_fullscreen_transition)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::should_render_macos_viewport;
+
+    fn occluded_viewport() -> egui::ViewportInfo {
+        egui::ViewportInfo {
+            minimized: Some(false),
+            occluded: Some(true),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn macos_renders_focused_fullscreen_viewport_when_occluded() {
+        let info = egui::ViewportInfo {
+            fullscreen: Some(true),
+            focused: Some(true),
+            ..occluded_viewport()
+        };
+
+        assert!(should_render_macos_viewport(&info, false));
+    }
+
+    #[test]
+    fn macos_skips_unfocused_fullscreen_viewport_when_occluded() {
+        let info = egui::ViewportInfo {
+            fullscreen: Some(true),
+            focused: Some(false),
+            ..occluded_viewport()
+        };
+
+        assert!(!should_render_macos_viewport(&info, false));
+    }
+
+    #[test]
+    fn macos_renders_viewport_during_fullscreen_transition() {
+        assert!(should_render_macos_viewport(&occluded_viewport(), true));
+    }
+
+    #[test]
+    fn macos_skips_minimized_viewport_during_fullscreen_transition() {
+        let info = egui::ViewportInfo {
+            minimized: Some(true),
+            ..occluded_viewport()
+        };
+
+        assert!(!should_render_macos_viewport(&info, true));
+    }
+}
+
 /// Create an egui context, restoring it from storage if possible.
 pub fn create_egui_context(storage: Option<&dyn crate::Storage>) -> egui::Context {
     profiling::function_scope!();
