@@ -179,6 +179,7 @@ pub struct Popup<'a> {
 
     /// Default width passed to the Area
     width: Option<f32>,
+    sizing_pass: bool,
     sense: Sense,
     layout: Layout,
     frame: Option<Frame>,
@@ -201,6 +202,7 @@ impl<'a> Popup<'a> {
             alternative_aligns: None,
             gap: 0.0,
             width: None,
+            sizing_pass: false,
             sense: Sense::click(),
             layout: Layout::default(),
             frame: None,
@@ -390,6 +392,19 @@ impl<'a> Popup<'a> {
         self
     }
 
+    /// Force the popup's underlying [`Area`] to run an invisible sizing pass.
+    ///
+    /// Popups automatically run a sizing pass when they open or reopen. Set this to `true` for
+    /// one frame when the contents of an already open popup change and its cached size may no
+    /// longer fit. Do not leave it enabled continuously, because the popup would remain invisible.
+    ///
+    /// Default: `false`.
+    #[inline]
+    pub fn sizing_pass(mut self, sizing_pass: bool) -> Self {
+        self.sizing_pass = sizing_pass;
+        self
+    }
+
     /// Set the id of the Area.
     #[inline]
     pub fn id(mut self, id: Id) -> Self {
@@ -545,6 +560,7 @@ impl<'a> Popup<'a> {
             alternative_aligns: _,
             gap,
             width,
+            sizing_pass,
             sense,
             layout,
             frame,
@@ -571,7 +587,7 @@ impl<'a> Popup<'a> {
             .fixed_pos(anchor)
             .sense(sense)
             .layout(layout)
-            .sizing_pass(!was_open_last_frame)
+            .sizing_pass(sizing_pass || !was_open_last_frame)
             .info(info.unwrap_or_else(|| {
                 UiStackInfo::new(kind.into()).with_tag_value(
                     MenuConfig::MENU_CONFIG_TAG,
