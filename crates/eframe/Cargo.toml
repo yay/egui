@@ -23,6 +23,10 @@ workspace = true
 
 [lib]
 
+[[example]]
+name = "windowless_lifecycle"
+required-features = ["glow", "wgpu"]
+
 
 [features]
 default = [

@@ -1246,6 +1246,12 @@ impl ViewportCommand {
 /// by the integration.
 #[derive(Clone)]
 pub struct ViewportOutput {
+    /// Monotonic order in which egui first declared this viewport.
+    ///
+    /// Commands can create state for an undeclared viewport, so this is `None` until a
+    /// `show_viewport_*` call declares it.
+    pub declaration_ordinal: Option<u64>,
+
     /// Id of our parent viewport.
     pub parent: ViewportId,
 
@@ -1277,19 +1283,38 @@ pub struct ViewportOutput {
     ///
     /// If the duration is zero, schedule a repaint immediately.
     pub repaint_delay: std::time::Duration,
+
+    /// Repaint delay before integrations compensate using their predicted frame duration.
+    pub requested_repaint_delay: std::time::Duration,
 }
 
 impl ViewportOutput {
     /// Add on new output.
     pub fn append(&mut self, newer: Self) {
         let Self {
+            declaration_ordinal,
             parent,
             class,
             builder,
             viewport_ui_cb,
             mut commands,
             repaint_delay,
+            requested_repaint_delay,
         } = newer;
+
+        match (self.declaration_ordinal, declaration_ordinal) {
+            (None, Some(ordinal)) => self.declaration_ordinal = Some(ordinal),
+            (Some(current), Some(new)) if current != new => {
+                debug_assert_eq!(
+                    current, new,
+                    "viewport declaration ordinal changed without removal"
+                );
+                log::error!(
+                    "Viewport declaration ordinal changed without removal: {current} -> {new}"
+                );
+            }
+            _ => {}
+        }
 
         self.parent = parent;
         self.class = class;
@@ -1297,6 +1322,7 @@ impl ViewportOutput {
         self.viewport_ui_cb = viewport_ui_cb;
         self.commands.append(&mut commands);
         self.repaint_delay = self.repaint_delay.min(repaint_delay);
+        self.requested_repaint_delay = self.requested_repaint_delay.min(requested_repaint_delay);
     }
 }
 
@@ -1304,6 +1330,9 @@ impl ViewportOutput {
 pub struct ImmediateViewport<'a> {
     /// Id of us and our parent.
     pub ids: ViewportIdPair,
+
+    /// Monotonic order assigned when this viewport was first declared.
+    pub declaration_ordinal: u64,
 
     pub builder: ViewportBuilder,
 

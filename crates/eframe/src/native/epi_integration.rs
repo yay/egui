@@ -5,7 +5,7 @@ use web_time::Instant;
 use std::{path::PathBuf, sync::Arc};
 use winit::event_loop::ActiveEventLoop;
 
-use raw_window_handle::{HasDisplayHandle as _, HasWindowHandle as _};
+use raw_window_handle::HasWindowHandle as _;
 
 use egui::{DeferredViewportUiCallback, ViewportBuilder, ViewportId};
 use egui_winit::{EventResponse, WindowSettings};
@@ -171,7 +171,11 @@ impl EpiIntegration {
     #[allow(clippy::allow_attributes, clippy::too_many_arguments)]
     pub fn new(
         egui_ctx: egui::Context,
-        window: &Arc<winit::window::Window>,
+        window: Option<&Arc<winit::window::Window>>,
+        raw_display_handle: Result<
+            raw_window_handle::RawDisplayHandle,
+            raw_window_handle::HandleError,
+        >,
         app_name: &str,
         native_options: &crate::NativeOptions,
         storage: Option<Box<dyn epi::Storage>>,
@@ -192,9 +196,12 @@ impl EpiIntegration {
             glow_register_native_texture,
             #[cfg(feature = "wgpu_no_default_features")]
             wgpu_render_state,
-            window: Some(Arc::clone(window)),
-            raw_display_handle: window.display_handle().map(|h| h.as_raw()),
-            raw_window_handle: window.window_handle().map(|h| h.as_raw()),
+            window: window.cloned(),
+            raw_display_handle,
+            raw_window_handle: window.map_or(
+                Err(raw_window_handle::HandleError::NotSupported),
+                |window| window.window_handle().map(|handle| handle.as_raw()),
+            ),
         };
 
         let icon = native_options
@@ -378,10 +385,44 @@ impl EpiIntegration {
     }
 }
 
+/// Installs eframe's default icon when the root builder has no explicit icon.
+///
+/// A windowless root retains this icon as metadata so every deferred child can inherit the same
+/// fallback that a native root window would receive.
+pub(super) fn ensure_default_egui_icon(builder: &mut egui::ViewportBuilder) {
+    builder
+        .icon
+        .get_or_insert_with(|| Arc::new(load_default_egui_icon()));
+}
+
 fn load_default_egui_icon() -> egui::IconData {
     profiling::function_scope!();
     #[expect(clippy::unwrap_used)]
     crate::icon_data::from_png_bytes(&include_bytes!("../../data/icon.png")[..]).unwrap()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_icon_fills_only_an_unspecified_root_icon() {
+        let mut fallback_builder = egui::ViewportBuilder::default();
+        ensure_default_egui_icon(&mut fallback_builder);
+        let fallback = fallback_builder
+            .icon
+            .expect("default icon must be installed");
+        assert!(fallback.width > 0);
+        assert!(fallback.height > 0);
+
+        let explicit = Arc::new(egui::IconData::default());
+        let mut explicit_builder = egui::ViewportBuilder::default().with_icon(explicit.clone());
+        ensure_default_egui_icon(&mut explicit_builder);
+        assert!(Arc::ptr_eq(
+            explicit_builder.icon.as_ref().unwrap(),
+            &explicit
+        ));
+    }
 }
 
 #[cfg(feature = "persistence")]

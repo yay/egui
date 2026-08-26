@@ -110,12 +110,14 @@ mod tests {
             viewport_output.entries.insert(
                 viewport_id,
                 ViewportOutput {
+                    declaration_ordinal: Some(1),
                     parent: ViewportId::ROOT,
                     class: ViewportClass::Deferred,
                     builder: ViewportBuilder::default(),
                     viewport_ui_cb: None,
                     commands: vec![],
                     repaint_delay: std::time::Duration::MAX,
+                    requested_repaint_delay: std::time::Duration::MAX,
                 },
             );
         }

@@ -28,6 +28,39 @@ pub use window_settings::WindowSettings;
 
 use raw_window_handle::HasDisplayHandle;
 
+/// Handles platform output that does not require a native window.
+///
+/// Logical viewports use this for clipboard and URL commands while cursor, IME, and accessibility
+/// output remains owned by real viewport windows.
+pub struct WindowIndependentState {
+    clipboard: clipboard::Clipboard,
+}
+
+impl WindowIndependentState {
+    /// Creates a window-independent platform handler for the given display.
+    pub fn new(raw_display_handle: Option<raw_window_handle::RawDisplayHandle>) -> Self {
+        Self {
+            clipboard: clipboard::Clipboard::new(raw_display_handle),
+        }
+    }
+
+    /// Applies clipboard and URL commands and ignores window-dependent output.
+    pub fn handle_platform_output(&mut self, platform_output: &egui::PlatformOutput) {
+        for command in &platform_output.commands {
+            match command {
+                egui::OutputCommand::CopyText(text) => self.clipboard.set_text(text.clone()),
+                egui::OutputCommand::CopyImage(image) => self.clipboard.set_image(image),
+                egui::OutputCommand::OpenUrl(open_url) => open_url_in_browser(&open_url.url),
+            }
+        }
+    }
+
+    /// Reads text from the system clipboard.
+    pub fn clipboard_text(&mut self) -> Option<String> {
+        self.clipboard.get()
+    }
+}
+
 use winit::{
     dpi::{PhysicalPosition, PhysicalSize},
     event::ElementState,
