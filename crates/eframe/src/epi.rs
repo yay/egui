@@ -139,7 +139,7 @@ impl CreationContext<'_> {
 
     /// Access to the root [`winit::window::Window`].
     ///
-    /// `None` for headless (tests etc).
+    /// `None` for headless tests and [`RootViewportMode::Windowless`].
     #[cfg(not(target_arch = "wasm32"))]
     pub fn winit_window(&self) -> Option<&std::sync::Arc<winit::window::Window>> {
         self.window.as_ref()
@@ -288,9 +288,17 @@ pub trait App {
 /// will be used as app id instead.
 #[cfg(not(target_arch = "wasm32"))]
 pub struct NativeOptions {
+    /// Whether the egui root viewport owns a native window.
+    ///
+    /// [`RootViewportMode::Windowless`] keeps the root as an application controller while all
+    /// visible UI is hosted by child viewports. It is supported on macOS and Windows.
+    pub root_viewport_mode: RootViewportMode,
+
     /// Controls the native window of the root viewport.
     ///
     /// This is where you set things like window title and size.
+    /// In windowless mode, the title is logical metadata and the icon is the fallback for children;
+    /// all other native-window attributes are ignored.
     ///
     /// If you don't set an icon, a default egui icon will be used.
     /// To avoid this, set the icon to [`egui::IconData::default`].
@@ -400,6 +408,7 @@ pub struct NativeOptions {
 impl Clone for NativeOptions {
     fn clone(&self) -> Self {
         Self {
+            root_viewport_mode: self.root_viewport_mode,
             viewport: self.viewport.clone(),
 
             #[cfg(any(feature = "glow", feature = "wgpu_no_default_features"))]
@@ -428,6 +437,7 @@ impl Clone for NativeOptions {
 impl Default for NativeOptions {
     fn default() -> Self {
         Self {
+            root_viewport_mode: RootViewportMode::Windowed,
             viewport: Default::default(),
 
             multisampling: 0,
@@ -464,6 +474,22 @@ impl Default for NativeOptions {
             android_app: None,
         }
     }
+}
+
+/// Controls whether the root egui viewport has a native presentation window.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum RootViewportMode {
+    /// Create and render a native root window, preserving traditional eframe behavior.
+    #[default]
+    Windowed,
+
+    /// Run the root viewport as a logical controller with no persistent native window.
+    ///
+    /// This is supported by the WGPU and Glow renderers on macOS and Windows. Other native
+    /// platforms return [`crate::Error::UnsupportedConfiguration`] before creating the app.
+    /// Child viewport builders are authoritative; only the logical root icon is inherited.
+    Windowless,
 }
 
 // ----------------------------------------------------------------------------
@@ -755,7 +781,7 @@ impl Frame {
 
     /// Access to the current [`winit::window::Window`] (i.e. the one the active viewport is rendered to).
     ///
-    /// `None` for headless (tests etc).
+    /// `None` for headless tests and [`RootViewportMode::Windowless`].
     #[cfg(not(target_arch = "wasm32"))]
     pub fn winit_window(&self) -> Option<&std::sync::Arc<winit::window::Window>> {
         self.window.as_ref()
@@ -770,6 +796,7 @@ impl Frame {
     ///
     /// Note that all egui painting is deferred to after the call to [`App::ui`]
     /// ([`egui`] only collects [`egui::Shape`]s and then eframe paints them all in one go later on).
+    /// A windowless logical root has a current resource context but no presentation framebuffer.
     ///
     /// To get a [`glow`] context you need to compile with the `glow` feature flag,
     /// and run eframe using [`Renderer::Glow`].

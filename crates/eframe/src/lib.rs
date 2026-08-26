@@ -502,6 +502,9 @@ pub fn run_ui_native(
 /// The different problems that can occur when trying to run `eframe`.
 #[derive(Debug)]
 pub enum Error {
+    /// The selected platform, renderer, or native mode combination is unsupported.
+    UnsupportedConfiguration(String),
+
     /// Something went wrong in user code when creating the app.
     AppCreation(Box<dyn std::error::Error + Send + Sync>),
 
@@ -575,6 +578,9 @@ impl From<egui_wgpu::WgpuError> for Error {
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::UnsupportedConfiguration(message) => {
+                write!(f, "unsupported configuration: {message}")
+            }
             Self::AppCreation(err) => write!(f, "app creation error: {err}"),
 
             #[cfg(not(target_arch = "wasm32"))]

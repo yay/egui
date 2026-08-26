@@ -53,6 +53,12 @@ pub struct RequestRepaintInfo {
     /// Repaint after this duration. If zero, repaint as soon as possible.
     pub delay: Duration,
 
+    /// The requested repaint delay before [`InputState::predicted_dt`] compensation.
+    ///
+    /// Integrations without a presentation surface can use this to distinguish a genuinely
+    /// immediate repaint from a delayed repaint that was advanced to avoid missing its deadline.
+    pub requested_delay: Duration,
+
     /// The number of fully completed passes, of the entire lifetime of the [`Context`].
     ///
     /// This can be compared to [`Context::cumulative_pass_nr`] to see if we we still
@@ -109,13 +115,16 @@ impl ContextImpl {
         if viewport.repaint.outstanding == 0 {
             // We are repainting now, so we can wait a while for the next repaint.
             viewport.repaint.repaint_delay = Duration::MAX;
+            viewport.repaint.requested_repaint_delay = Duration::MAX;
         } else {
             viewport.repaint.repaint_delay = Duration::ZERO;
+            viewport.repaint.requested_repaint_delay = Duration::ZERO;
             viewport.repaint.outstanding -= 1;
             if let Some(callback) = &self.request_repaint_callback {
                 (callback)(RequestRepaintInfo {
                     viewport_id,
                     delay: Duration::ZERO,
+                    requested_delay: Duration::ZERO,
                     current_cumulative_pass_nr: viewport.repaint.cumulative_pass_nr,
                 });
             }
@@ -133,6 +142,7 @@ impl ContextImpl {
         cause: RepaintCause,
     ) {
         let viewport = self.viewports.entry(viewport_id).or_default();
+        let requested_delay = delay;
 
         if delay == Duration::ZERO {
             // Each request results in two repaints, just to give some things time to settle.
@@ -152,16 +162,22 @@ impl ContextImpl {
 
         viewport.repaint.causes.push(cause);
 
-        // We save some CPU time by only calling the callback if we need to.
-        // If the new delay is greater or equal to the previous lowest,
-        // it means we have already called the callback, and don't need to do it again.
-        if delay < viewport.repaint.repaint_delay {
-            viewport.repaint.repaint_delay = delay;
+        // Track both deadlines. Different original delays can compensate to the same value, so
+        // either minimum becoming earlier must wake integrations that use the original request.
+        let compensated_improved = delay < viewport.repaint.repaint_delay;
+        let requested_improved = requested_delay < viewport.repaint.requested_repaint_delay;
+        if compensated_improved || requested_improved {
+            viewport.repaint.repaint_delay = viewport.repaint.repaint_delay.min(delay);
+            viewport.repaint.requested_repaint_delay = viewport
+                .repaint
+                .requested_repaint_delay
+                .min(requested_delay);
 
             if let Some(callback) = &self.request_repaint_callback {
                 (callback)(RequestRepaintInfo {
                     viewport_id,
-                    delay,
+                    delay: viewport.repaint.repaint_delay,
+                    requested_delay: viewport.repaint.requested_repaint_delay,
                     current_cumulative_pass_nr: viewport.repaint.cumulative_pass_nr,
                 });
             }
@@ -191,6 +207,11 @@ impl ContextImpl {
 /// Things here may move and change without warning.
 #[derive(Default)]
 pub struct ViewportState {
+    /// Monotonic order assigned when this viewport is first declared with `show_viewport_*`.
+    ///
+    /// Commands can create viewport state before declaration, so this remains `None` until then.
+    pub declaration_ordinal: Option<u64>,
+
     /// The type of viewport.
     ///
     /// This will never be [`ViewportClass::EmbeddedWindow`],
@@ -318,6 +339,9 @@ struct ViewportRepaintInfo {
     /// This is also returned in [`crate::ViewportOutput`].
     repaint_delay: Duration,
 
+    /// Minimum repaint delay requested before `predicted_dt` compensation.
+    requested_repaint_delay: Duration,
+
     /// While positive, keep requesting repaints. Decrement at the start of each pass.
     outstanding: u8,
 
@@ -343,6 +367,7 @@ impl Default for ViewportRepaintInfo {
 
             // We haven't scheduled a repaint yet.
             repaint_delay: Duration::MAX,
+            requested_repaint_delay: Duration::MAX,
 
             // Let's run a couple of frames at the start, because why not.
             outstanding: 1,
@@ -399,6 +424,9 @@ struct ContextImpl {
 
     viewport_parents: ViewportIdMap<ViewportId>,
     viewports: ViewportIdMap<ViewportState>,
+
+    /// Next declaration ordinal assigned by `show_viewport_*`.
+    next_viewport_declaration_ordinal: u64,
 
     embed_viewports: bool,
 
@@ -652,6 +680,23 @@ impl ContextImpl {
     fn viewport_for(&mut self, viewport_id: ViewportId) -> &mut ViewportState {
         self.viewports.entry(viewport_id).or_default()
     }
+
+    /// Return viewport state after assigning its first declaration ordinal.
+    fn declare_viewport(&mut self, viewport_id: ViewportId) -> &mut ViewportState {
+        let needs_ordinal = self
+            .viewports
+            .get(&viewport_id)
+            .is_none_or(|viewport| viewport.declaration_ordinal.is_none());
+        if needs_ordinal {
+            let ordinal = self.next_viewport_declaration_ordinal;
+            self.next_viewport_declaration_ordinal += 1;
+            self.viewports
+                .entry(viewport_id)
+                .or_default()
+                .declaration_ordinal = Some(ordinal);
+        }
+        self.viewports.entry(viewport_id).or_default()
+    }
 }
 
 // ----------------------------------------------------------------------------
@@ -725,7 +770,13 @@ impl Default for Context {
     fn default() -> Self {
         let ctx_impl = ContextImpl {
             embed_viewports: true,
-            viewports: std::iter::once((ViewportId::ROOT, ViewportState::default())).collect(),
+            next_viewport_declaration_ordinal: 1,
+            viewports: std::iter::once((ViewportId::ROOT, {
+                let mut root = ViewportState::default();
+                root.declaration_ordinal = Some(0);
+                root
+            }))
+            .collect(),
             ..Default::default()
         };
         let ctx = Self(Arc::new(RwLock::new(ctx_impl)));
@@ -2715,12 +2766,14 @@ impl ContextImpl {
                 (
                     id,
                     ViewportOutput {
+                        declaration_ordinal: viewport.declaration_ordinal,
                         parent,
                         class: viewport.class,
                         builder: viewport.builder.clone(),
                         viewport_ui_cb: viewport.viewport_ui_cb.clone(),
                         commands,
                         repaint_delay: viewport.repaint.repaint_delay,
+                        requested_repaint_delay: viewport.repaint.requested_repaint_delay,
                     },
                 )
             })
@@ -3981,7 +4034,7 @@ impl Context {
                 ctx.viewport_parents
                     .insert(new_viewport_id, ctx.viewport_id());
 
-                let viewport = ctx.viewports.entry(new_viewport_id).or_default();
+                let viewport = ctx.declare_viewport(new_viewport_id);
                 viewport.class = ViewportClass::Deferred;
                 viewport.builder = viewport_builder;
                 viewport.used = true;
@@ -4041,18 +4094,23 @@ impl Context {
                 });
             };
 
-            let ids = self.write(|ctx| {
+            let (ids, declaration_ordinal) = self.write(|ctx| {
                 let parent_viewport_id = ctx.viewport_id();
 
                 ctx.viewport_parents
                     .insert(new_viewport_id, parent_viewport_id);
 
-                let viewport = ctx.viewports.entry(new_viewport_id).or_default();
+                let viewport = ctx.declare_viewport(new_viewport_id);
                 viewport.builder = builder.clone();
                 viewport.used = true;
                 viewport.viewport_ui_cb = None; // it is immediate
 
-                ViewportIdPair::from_self_and_parent(new_viewport_id, parent_viewport_id)
+                (
+                    ViewportIdPair::from_self_and_parent(new_viewport_id, parent_viewport_id),
+                    viewport
+                        .declaration_ordinal
+                        .expect("show_viewport_immediate must declare its viewport"),
+                )
             });
 
             let mut out = None;
@@ -4061,6 +4119,7 @@ impl Context {
 
                 let viewport = ImmediateViewport {
                     ids,
+                    declaration_ordinal,
                     builder,
                     viewport_ui_cb: Box::new(move |ui| {
                         *out = Some((viewport_ui_cb)(ui, ViewportClass::Immediate));
@@ -4284,6 +4343,11 @@ fn warn_if_rect_changes_id(
 
 #[cfg(test)]
 mod test {
+    use std::{
+        sync::{Arc, Mutex},
+        time::Duration,
+    };
+
     use super::Context;
     use crate::{RawInput, ViewportBuilder, ViewportId, ViewportInfo};
 
@@ -4333,6 +4397,87 @@ mod test {
         let output = ctx.run_ui(hidden_root_input, |_| {});
         assert!(!output.viewport_output.entries.contains_key(&child_id));
         assert!(output.viewport_output.is_complete);
+    }
+
+    #[test]
+    fn repaint_callback_observes_improving_uncompensated_deadline() {
+        let ctx = Context::default();
+        let _ = ctx.run_ui(Default::default(), |_| {});
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let callback_requests = Arc::clone(&requests);
+        ctx.set_request_repaint_callback(move |info| {
+            callback_requests.lock().unwrap().push(info);
+        });
+
+        let input = RawInput {
+            predicted_dt: 0.1,
+            ..Default::default()
+        };
+        let _ = ctx.run_ui(input, |ui| {
+            ui.ctx().request_repaint_after(Duration::from_millis(80));
+            ui.ctx().request_repaint_after(Duration::from_millis(50));
+        });
+
+        let requests = requests.lock().unwrap();
+        assert!(
+            requests.iter().any(|request| {
+                request.delay == Duration::ZERO
+                    && request.requested_delay == Duration::from_millis(80)
+            }),
+            "{requests:?}"
+        );
+        assert!(requests.iter().any(|request| {
+            request.delay == Duration::ZERO && request.requested_delay == Duration::from_millis(50)
+        }));
+    }
+
+    #[test]
+    fn viewport_ordinals_follow_declaration_instead_of_id_order() {
+        let ctx = Context::default();
+        ctx.set_embed_viewports(false);
+        let one = ViewportId::from_hash_of("ordinal-one");
+        let two = ViewportId::from_hash_of("ordinal-two");
+        let (second, first) = if one < two { (one, two) } else { (two, one) };
+        assert!(first > second, "test requires reverse ID/declaration order");
+
+        let output = ctx.run_ui(Default::default(), |_ui| {
+            ctx.show_viewport_deferred(first, ViewportBuilder::default(), |_, _| {});
+            ctx.show_viewport_deferred(second, ViewportBuilder::default(), |_, _| {});
+        });
+
+        let first_ordinal = output.viewport_output.entries[&first]
+            .declaration_ordinal
+            .unwrap();
+        let second_ordinal = output.viewport_output.entries[&second]
+            .declaration_ordinal
+            .unwrap();
+        assert!(first_ordinal < second_ordinal);
+    }
+
+    #[test]
+    fn removed_and_reintroduced_viewport_receives_a_new_ordinal() {
+        let ctx = Context::default();
+        ctx.set_embed_viewports(false);
+        let child = ViewportId::from_hash_of("ordinal-reintroduction");
+
+        let first = ctx.run_ui(Default::default(), |_ui| {
+            ctx.show_viewport_deferred(child, ViewportBuilder::default(), |_, _| {});
+        });
+        let first_ordinal = first.viewport_output.entries[&child]
+            .declaration_ordinal
+            .unwrap();
+
+        let removed = ctx.run_ui(Default::default(), |_| {});
+        assert!(removed.viewport_output.is_complete);
+        assert!(!removed.viewport_output.entries.contains_key(&child));
+
+        let reintroduced = ctx.run_ui(Default::default(), |_ui| {
+            ctx.show_viewport_deferred(child, ViewportBuilder::default(), |_, _| {});
+        });
+        let second_ordinal = reintroduced.viewport_output.entries[&child]
+            .declaration_ordinal
+            .unwrap();
+        assert!(second_ordinal > first_ordinal);
     }
 
     #[test]

@@ -4,6 +4,9 @@ All notable changes to the `egui_glow` integration will be noted in this file.
 This file is updated upon each release.
 Changes since the last release can be found at <https://github.com/emilk/egui/compare/latest...HEAD> or by running the `scripts/generate_changelog.py` script.
 
+## Unreleased
+
+- Add an explicit no-GL cleanup path for unrecoverable native context failures.
 
 
 ## 0.35.0 - 2026-06-25

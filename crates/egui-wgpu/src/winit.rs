@@ -39,6 +39,7 @@ impl NativeResizeState {
 struct SurfaceState {
     surface: wgpu::Surface<'static>,
     alpha_mode: wgpu::CompositeAlphaMode,
+    transparent: bool,
     width: u32,
     height: u32,
     has_presented: bool,
@@ -196,8 +197,8 @@ impl Painter {
             old_state.width,
             old_state.height,
             old_state.native_resize_state,
-        );
-        Ok(())
+            old_state.transparent,
+        )
     }
 
     /// Updates (or clears) the [`winit::window::Window`] associated with the [`Painter`]
@@ -226,13 +227,25 @@ impl Painter {
         viewport_id: ViewportId,
         window: Option<Arc<winit::window::Window>>,
     ) -> Result<(), crate::WgpuError> {
+        self.set_window_with_transparency(viewport_id, window, self.support_transparent_backbuffer)
+            .await
+    }
+
+    /// Updates a viewport window with a transparency request local to that surface.
+    pub async fn set_window_with_transparency(
+        &mut self,
+        viewport_id: ViewportId,
+        window: Option<Arc<winit::window::Window>>,
+        transparent: bool,
+    ) -> Result<(), crate::WgpuError> {
         profiling::scope!("Painter::set_window"); // profile_function gives bad names for async functions
 
         if let Some(window) = window {
             let size = window.inner_size();
             if !self.surfaces.contains_key(&viewport_id) {
                 let surface = self.instance.create_surface(window)?;
-                self.add_surface(surface, viewport_id, size).await?;
+                self.add_surface(surface, viewport_id, size, transparent)
+                    .await?;
             }
         } else {
             log::warn!("No window - clearing all surfaces");
@@ -261,7 +274,13 @@ impl Painter {
                     self.instance
                         .create_surface_unsafe(wgpu::SurfaceTargetUnsafe::from_window(&window)?)?
                 };
-                self.add_surface(surface, viewport_id, size).await?;
+                self.add_surface(
+                    surface,
+                    viewport_id,
+                    size,
+                    self.support_transparent_backbuffer,
+                )
+                .await?;
             }
         } else {
             log::warn!("No window - clearing all surfaces");
@@ -275,6 +294,7 @@ impl Painter {
         surface: wgpu::Surface<'static>,
         viewport_id: ViewportId,
         size: winit::dpi::PhysicalSize<u32>,
+        transparent: bool,
     ) -> Result<(), crate::WgpuError> {
         if self.render_state.is_none() {
             let render_state =
@@ -288,8 +308,8 @@ impl Painter {
             size.width,
             size.height,
             NativeResizeState::Idle,
-        );
-        Ok(())
+            transparent,
+        )
     }
 
     /// Inserts a freshly created surface into [`Self::surfaces`] and configures it.
@@ -303,16 +323,20 @@ impl Painter {
         width: u32,
         height: u32,
         native_resize_state: NativeResizeState,
-    ) {
+        transparent: bool,
+    ) -> Result<(), crate::WgpuError> {
         let alpha_mode = {
             // Panic: We use the same failure mode as `resize_and_generate_depth_texture_view_and_msaa_view`
             let render_state = self
                 .render_state
                 .as_ref()
                 .expect("install_surface called before render_state initialization");
-            if self.support_transparent_backbuffer {
-                let supported_alpha_modes =
-                    surface.get_capabilities(&render_state.adapter).alpha_modes;
+            let capabilities = surface.get_capabilities(&render_state.adapter);
+            if !capabilities.formats.contains(&render_state.target_format) {
+                return Err(crate::WgpuError::IncompatibleSurface);
+            }
+            if transparent {
+                let supported_alpha_modes = capabilities.alpha_modes;
                 // Prefer pre multiplied over post multiplied!
                 if supported_alpha_modes.contains(&wgpu::CompositeAlphaMode::PreMultiplied) {
                     wgpu::CompositeAlphaMode::PreMultiplied
@@ -340,19 +364,72 @@ impl Painter {
                 #[cfg(all(target_os = "macos", feature = "macos-window-resize-jitter-fix"))]
                 pending_native_resize_state: None,
                 alpha_mode,
+                transparent,
                 needs_reconfigure: false,
                 needs_recreate: false,
             },
         );
         let Some(width) = NonZeroU32::new(width) else {
             log::debug!("The window width was zero; skipping generate textures");
-            return;
+            return Ok(());
         };
         let Some(height) = NonZeroU32::new(height) else {
             log::debug!("The window height was zero; skipping generate textures");
-            return;
+            return Ok(());
         };
         self.resize_and_generate_depth_texture_view_and_msaa_view(viewport_id, width, height);
+        Ok(())
+    }
+
+    /// Removes the rendering surface associated with one viewport without affecting any others.
+    pub fn remove_surface(&mut self, viewport_id: ViewportId) {
+        self.surfaces.remove(&viewport_id);
+        self.depth_texture_view.remove(&viewport_id);
+        self.msaa_texture_view.remove(&viewport_id);
+    }
+
+    /// Updates one surface's transparency mode and reconfigures it in place.
+    pub fn set_surface_transparency(
+        &mut self,
+        viewport_id: ViewportId,
+        transparent: bool,
+    ) -> Result<(), crate::WgpuError> {
+        let Some(surface_state) = self.surfaces.get_mut(&viewport_id) else {
+            return Ok(());
+        };
+        let render_state = self
+            .render_state
+            .as_ref()
+            .expect("surface exists without render state");
+        let capabilities = surface_state
+            .surface
+            .get_capabilities(&render_state.adapter);
+        if !capabilities.formats.contains(&render_state.target_format) {
+            return Err(crate::WgpuError::IncompatibleSurface);
+        }
+        surface_state.transparent = transparent;
+        surface_state.alpha_mode = if transparent {
+            if capabilities
+                .alpha_modes
+                .contains(&wgpu::CompositeAlphaMode::PreMultiplied)
+            {
+                wgpu::CompositeAlphaMode::PreMultiplied
+            } else if capabilities
+                .alpha_modes
+                .contains(&wgpu::CompositeAlphaMode::PostMultiplied)
+            {
+                wgpu::CompositeAlphaMode::PostMultiplied
+            } else {
+                log::warn!("Transparent window requested, but the surface has no alpha mode");
+                wgpu::CompositeAlphaMode::Auto
+            }
+        } else {
+            wgpu::CompositeAlphaMode::Auto
+        };
+        if surface_state.width > 0 && surface_state.height > 0 {
+            Self::configure_surface(surface_state, render_state, &self.config.surface);
+        }
+        Ok(())
     }
 
     /// Returns the maximum texture dimension supported if known

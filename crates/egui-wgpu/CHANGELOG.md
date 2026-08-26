@@ -5,6 +5,9 @@ All notable changes to the `egui-wgpu` integration will be noted in this file.
 This file is updated upon each release.
 Changes since the last release can be found at <https://github.com/emilk/egui/compare/latest...HEAD> or by running the `scripts/generate_changelog.py` script.
 
+## Unreleased
+* Support per-surface transparency and removing bootstrap surfaces independently.
+
 
 ## 0.35.0 - 2026-06-25
 * Call `pre_present_notify` before presenting [#8089](https://github.com/emilk/egui/pull/8089) by [@dimtpap](https://github.com/dimtpap)

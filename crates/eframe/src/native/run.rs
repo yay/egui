@@ -78,6 +78,8 @@ fn with_event_loop<R>(
 /// some events, but otherwise forwards events to the [`WinitApp`].
 struct WinitAppWrapper<T: WinitApp> {
     windows_next_repaint_times: HashMap<WindowId, Instant>,
+    logical_root_next_repaint_time: Option<Instant>,
+    logical_root_last_repaint_time: Option<Instant>,
     winit_app: T,
     return_result: Result<(), crate::Error>,
     run_and_return: bool,
@@ -87,6 +89,8 @@ impl<T: WinitApp> WinitAppWrapper<T> {
     fn new(winit_app: T, run_and_return: bool) -> Self {
         Self {
             windows_next_repaint_times: HashMap::default(),
+            logical_root_next_repaint_time: None,
+            logical_root_last_repaint_time: None,
             winit_app,
             return_result: Ok(()),
             run_and_return,
@@ -142,6 +146,20 @@ impl<T: WinitApp> WinitAppWrapper<T> {
                 );
                 event_result
             }
+            EventResult::RepaintLogicalRootNow => {
+                // Do not run the logical root re-entrantly from `resumed`: on macOS the first
+                // child window cannot be created until winit has returned to its event loop.
+                self.logical_root_next_repaint_time =
+                    Some(Instant::now() + Duration::from_millis(1));
+                event_result
+            }
+            EventResult::RepaintLogicalRootAt(repaint_time) => {
+                self.logical_root_next_repaint_time = Some(
+                    self.logical_root_next_repaint_time
+                        .map_or(repaint_time, |last| last.min(repaint_time)),
+                );
+                event_result
+            }
             EventResult::Save => {
                 save = true;
                 event_result
@@ -153,6 +171,11 @@ impl<T: WinitApp> WinitAppWrapper<T> {
             EventResult::CloseRequested => {
                 // The windows need to be dropped whilst the event loop is running to allow for proper cleanup.
                 self.winit_app.save_and_destroy();
+                event_result
+            }
+            EventResult::CloseRequestedAndExit => {
+                self.winit_app.save_and_destroy();
+                exit = true;
                 event_result
             }
         });
@@ -187,6 +210,17 @@ impl<T: WinitApp> WinitAppWrapper<T> {
 
     fn check_redraw_requests(&mut self, event_loop: &ActiveEventLoop) {
         let now = Instant::now();
+
+        if self
+            .logical_root_next_repaint_time
+            .is_some_and(|repaint_time| repaint_time <= now)
+        {
+            self.logical_root_next_repaint_time = None;
+            self.logical_root_last_repaint_time = Some(now);
+            let event_result = self.winit_app.run_logical_root(event_loop);
+            self.handle_event_result(event_loop, event_result);
+            return;
+        }
 
         let mut invisible_window_ids = Vec::new();
 
@@ -236,7 +270,14 @@ impl<T: WinitApp> WinitAppWrapper<T> {
             }
         }
 
-        let next_repaint_time = self.windows_next_repaint_times.values().min().copied();
+        let next_repaint_time = self
+            .windows_next_repaint_times
+            .values()
+            .min()
+            .copied()
+            .into_iter()
+            .chain(self.logical_root_next_repaint_time)
+            .min();
         if let Some(next_repaint_time) = next_repaint_time {
             event_loop.set_control_flow(ControlFlow::WaitUntil(next_repaint_time));
         }
@@ -298,6 +339,8 @@ impl<T: WinitApp> ApplicationHandler<UserEvent> for WinitAppWrapper<T> {
             let event_result = match event {
                 UserEvent::RequestRepaint {
                     when,
+                    requested_when,
+                    genuinely_immediate,
                     cumulative_pass_nr,
                     viewport_id,
                 } => {
@@ -309,7 +352,21 @@ impl<T: WinitApp> ApplicationHandler<UserEvent> for WinitAppWrapper<T> {
                         || current_pass_nr == cumulative_pass_nr + 1
                     {
                         log::trace!("UserEvent::RequestRepaint scheduling repaint at {when:?}");
-                        if let Some(window_id) =
+                        if viewport_id == egui::ViewportId::ROOT
+                            && self.winit_app.has_logical_root()
+                        {
+                            let when = if genuinely_immediate {
+                                self.logical_root_last_repaint_time
+                                    .map_or(requested_when, |last| {
+                                        requested_when.max(
+                                            last + self.winit_app.logical_root_repaint_interval(),
+                                        )
+                                    })
+                            } else {
+                                requested_when
+                            };
+                            Ok(EventResult::RepaintLogicalRootAt(when))
+                        } else if let Some(window_id) =
                             self.winit_app.window_id_from_viewport_id(viewport_id)
                         {
                             // Throttle repaints for invisible windows to prevent

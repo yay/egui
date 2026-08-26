@@ -4,6 +4,9 @@ All notable changes to the `egui-winit` integration will be noted in this file.
 This file is updated upon each release.
 Changes since the last release can be found at <https://github.com/emilk/egui/compare/latest...HEAD> or by running the `scripts/generate_changelog.py` script.
 
+## Unreleased
+* Add window-independent clipboard and URL platform-output handling.
+
 
 ## 0.35.0 - 2026-06-25
 * Delegate handling of IME interruptions to integrations to fix virtual keyboard flickering on web [#8078](https://github.com/emilk/egui/pull/8078) by [@umajho](https://github.com/umajho)

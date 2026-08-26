@@ -53,6 +53,9 @@ pub enum WgpuError {
     #[error("There was no valid format for the surface at all.")]
     NoSurfaceFormatsAvailable,
 
+    #[error("The surface is incompatible with the initialized adapter or target format.")]
+    IncompatibleSurface,
+
     #[error(transparent)]
     RequestDeviceError(#[from] wgpu::RequestDeviceError),
 

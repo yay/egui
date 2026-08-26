@@ -721,6 +721,15 @@ impl Painter {
         }
     }
 
+    /// Marks this painter abandoned without issuing any OpenGL calls.
+    ///
+    /// This is only valid during degraded native cleanup when no context can safely be made
+    /// current and the owning native context is about to be dropped. Normal cleanup must call
+    /// [`Self::destroy`] so GPU resources are released explicitly.
+    pub fn abandon_without_gl_cleanup(&mut self) {
+        self.destroyed = true;
+    }
+
     fn assert_not_destroyed(&self) {
         assert!(!self.destroyed, "the egui glow has already been destroyed!");
     }

@@ -6,6 +6,10 @@ NOTE: [`egui-winit`](../egui-winit/CHANGELOG.md), [`egui_glow`](../egui_glow/CHA
 This file is updated upon each release.
 Changes since the last release can be found at <https://github.com/emilk/egui/compare/latest...HEAD> or by running the `scripts/generate_changelog.py` script.
 
+## Unreleased
+* Add `RootViewportMode::Windowless` for logical native roots on macOS and Windows.
+* Add uncompensated repaint deadlines and viewport declaration ordinals used by windowless roots.
+
 
 ## 0.35.0 - 2026-06-25
 ### ⭐ Added

@@ -13,6 +13,10 @@ This is just the changelog for the core `egui` crate. Every crate in this reposi
 This file is updated upon each release.
 Changes since the last release can be found at <https://github.com/emilk/egui/compare/latest...HEAD> or by running the `scripts/generate_changelog.py` script.
 
+## Unreleased
+
+- Expose uncompensated repaint deadlines and stable viewport declaration ordinals for native
+  integrations.
 
 ## 0.35.0 - 2026-06-25 - Inspection, egui_mcp, classes and improved IME
 
