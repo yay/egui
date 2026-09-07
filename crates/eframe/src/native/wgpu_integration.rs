@@ -1009,6 +1009,10 @@ impl WgpuWinitRunning<'_> {
     fn run_logical_root(&mut self, event_loop: &ActiveEventLoop) -> Result<EventResult> {
         profiling::function_scope!();
 
+        let frame_timer = crate::viewport_frame_timing::ViewportFrameTimer::new(
+            &self.integration.egui_ctx,
+            ViewportId::ROOT,
+        );
         let raw_input = {
             let mut shared = self.shared.borrow_mut();
             let commands = shared
@@ -1096,6 +1100,7 @@ impl WgpuWinitRunning<'_> {
             }
         }
 
+        self.integration.report_frame_time(frame_timer.finish());
         self.integration.maybe_autosave(self.app.as_mut(), None);
 
         if self.integration.should_close() {
@@ -1135,8 +1140,10 @@ impl WgpuWinitRunning<'_> {
             ..
         } = self;
 
-        let mut frame_timer = crate::stopwatch::Stopwatch::new();
-        frame_timer.start();
+        let mut frame_timer = crate::viewport_frame_timing::ViewportFrameTimer::new(
+            &integration.egui_ctx,
+            viewport_id,
+        );
 
         let (viewport_ui_cb, raw_input, is_visible, run_ui) = {
             profiling::scope!("Prepare");
@@ -1351,7 +1358,13 @@ impl WgpuWinitRunning<'_> {
             .and_then(|id| viewports.get(id))
             .and_then(|vp| vp.window.as_ref());
 
-        integration.report_frame_time(frame_timer.total_time_sec() - vsync_secs); // don't count auto-save time as part of regular frame time
+        frame_timer.exclude_seconds(vsync_secs);
+        if run_ui {
+            let seconds = frame_timer.finish();
+            if viewport_id == ViewportId::ROOT {
+                integration.report_frame_time(seconds);
+            }
+        } // don't count auto-save time as part of regular frame time
 
         integration.maybe_autosave(app.as_mut(), window.map(|w| w.as_ref()));
 
@@ -1687,6 +1700,9 @@ fn render_immediate_viewport(
         mut viewport_ui_cb,
     } = immediate_viewport;
 
+    let timing_ctx = shared.borrow().egui_ctx.clone();
+    let mut frame_timer =
+        crate::viewport_frame_timing::ViewportFrameTimer::new(&timing_ctx, ids.this);
     let mut initialization_error = None;
     let creation_failed = {
         let mut shared = shared.borrow_mut();
@@ -1830,7 +1846,7 @@ fn render_immediate_viewport(
     }
 
     let clipped_primitives = egui_ctx.tessellate(shapes, pixels_per_point);
-    painter.paint_and_update_textures(
+    let vsync_secs = painter.paint_and_update_textures(
         ids.this,
         pixels_per_point,
         [0.0, 0.0, 0.0, 0.0],
@@ -1857,6 +1873,8 @@ fn render_immediate_viewport(
         painter,
         viewport_from_window,
     );
+    frame_timer.exclude_seconds(vsync_secs);
+    frame_timer.finish();
 }
 
 fn remove_viewports_not_in(

@@ -698,6 +698,10 @@ impl GlowWinitRunning<'_> {
     /// Runs one application pass while the logical root has no native window.
     fn run_logical_root(&mut self, event_loop: &ActiveEventLoop) -> Result<EventResult> {
         profiling::function_scope!();
+        let frame_timer = crate::viewport_frame_timing::ViewportFrameTimer::new(
+            &self.integration.egui_ctx,
+            ViewportId::ROOT,
+        );
 
         self.glutin.borrow_mut().make_controller_current()?;
         let raw_input = {
@@ -773,6 +777,7 @@ impl GlowWinitRunning<'_> {
             )?;
         }
 
+        self.integration.report_frame_time(frame_timer.finish());
         self.integration.maybe_autosave(self.app.as_mut(), None);
         if self.integration.should_close() {
             Ok(EventResult::CloseRequestedAndExit)
@@ -804,8 +809,10 @@ impl GlowWinitRunning<'_> {
 
         profiling::finish_frame!();
 
-        let mut frame_timer = crate::stopwatch::Stopwatch::new();
-        frame_timer.start();
+        let mut frame_timer = crate::viewport_frame_timing::ViewportFrameTimer::new(
+            &self.integration.egui_ctx,
+            viewport_id,
+        );
 
         {
             let glutin = self.glutin.borrow();
@@ -1076,7 +1083,12 @@ impl GlowWinitRunning<'_> {
 
         glutin.handle_viewport_output(event_loop, &integration.egui_ctx, &viewport_output)?;
 
-        integration.report_frame_time(frame_timer.total_time_sec()); // don't count auto-save time as part of regular frame time
+        if run_ui {
+            let seconds = frame_timer.finish();
+            if viewport_id == ViewportId::ROOT {
+                integration.report_frame_time(seconds);
+            }
+        } // don't count auto-save time as part of regular frame time
 
         integration.maybe_autosave(app.as_mut(), Some(&window));
 
@@ -2313,6 +2325,8 @@ fn render_immediate_viewport(
     } = immediate_viewport;
 
     let viewport_id = ids.this;
+    let mut frame_timer =
+        crate::viewport_frame_timing::ViewportFrameTimer::new(egui_ctx, viewport_id);
     let previous_framebuffers = FramebufferBindings::capture(painter.borrow().gl());
 
     let creation_failed = {
@@ -2503,9 +2517,11 @@ fn render_immediate_viewport(
 
     {
         profiling::scope!("swap_buffers");
+        frame_timer.pause();
         if let Err(err) = gl_surface.swap_buffers(current_gl_context) {
             log::error!("swap_buffers failed: {err}");
         }
+        frame_timer.resume();
     }
 
     if !viewport.has_presented {
@@ -2548,6 +2564,9 @@ fn render_immediate_viewport(
     ) && glutin.fatal_error.is_none()
     {
         glutin.fatal_error = Some(error);
+    }
+    if glutin.fatal_error.is_none() {
+        frame_timer.finish();
     }
 }
 

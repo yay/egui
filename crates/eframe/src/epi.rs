@@ -924,7 +924,11 @@ pub struct IntegrationInfo {
     #[cfg(target_arch = "wasm32")]
     pub web_info: WebInfo,
 
-    /// Seconds of cpu usage (in seconds) on the previous frame.
+    /// Seconds of CPU frame work on the previous root update.
+    ///
+    /// On native backends this belongs to ROOT (including a windowless controller), excludes
+    /// nested immediate viewport work, and is not overwritten by deferred child frames.
+    /// Use `set_viewport_frame_timing_callback` for completed per-viewport native samples.
     ///
     /// This includes [`App::ui`] as well as rendering (except for vsync waiting).
     ///

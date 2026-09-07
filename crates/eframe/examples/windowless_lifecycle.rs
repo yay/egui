@@ -36,6 +36,8 @@ mod native {
     struct State {
         show: AtomicBool,
         callbacks: AtomicUsize,
+        timed_root_frames: AtomicUsize,
+        timed_child_frames: AtomicUsize,
         cancel_next_close: AtomicBool,
         cancelled_closes: AtomicUsize,
         focused: AtomicBool,
@@ -152,6 +154,15 @@ mod native {
         check(after > before, "child repaint did not wake its UI");
         check(after - before < 100, "child repaint caused an unpaced loop");
 
+        check(
+            state.timed_root_frames.load(SeqCst) > 0,
+            "logical root timing is missing",
+        );
+        check(
+            state.timed_child_frames.load(SeqCst) == after,
+            "completed child frames must each report exactly one timing",
+        );
+
         // Removing the final native window must keep the logical controller usable.
         state.show.store(false, SeqCst);
         ctx.request_repaint_of(egui::ViewportId::ROOT);
@@ -219,6 +230,18 @@ mod native {
                         "creation context must expose a window only in windowed mode"
                     );
                     let state = Arc::new(State::default());
+                    let timing_state = Arc::clone(&state);
+                    eframe::set_viewport_frame_timing_callback(
+                        &cc.egui_ctx,
+                        Some(Arc::new(move |sample| {
+                            assert!(sample.cpu_usage.is_finite() && sample.cpu_usage >= 0.0);
+                            if sample.viewport_id == egui::ViewportId::ROOT {
+                                timing_state.timed_root_frames.fetch_add(1, SeqCst);
+                            } else if sample.viewport_id == child_id() {
+                                timing_state.timed_child_frames.fetch_add(1, SeqCst);
+                            }
+                        })),
+                    );
                     let ctx = cc.egui_ctx.clone();
                     let control = Arc::clone(&state);
                     worker = Some(

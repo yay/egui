@@ -168,6 +168,11 @@ pub use epi::*;
 
 pub(crate) mod stopwatch;
 
+#[cfg(not(target_arch = "wasm32"))]
+mod viewport_frame_timing;
+#[cfg(not(target_arch = "wasm32"))]
+pub use viewport_frame_timing::{ViewportFrameTiming, set_viewport_frame_timing_callback};
+
 // ----------------------------------------------------------------------------
 // When compiling for web
 
