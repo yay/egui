@@ -794,11 +794,17 @@ impl WinitApp for WgpuWinitApp<'_> {
     ) -> Result<EventResult> {
         self.initialized_all_windows(event_loop)?;
 
-        if let Some(running) = &mut self.running {
-            running.run_ui_and_paint(window_id, event_loop)
+        let result = if let Some(running) = &mut self.running {
+            running.run_ui_and_paint(window_id, event_loop)?
         } else {
-            Ok(EventResult::Wait)
-        }
+            EventResult::Wait
+        };
+
+        // A child pass can declare deferred windows after the pre-paint initialization above.
+        // Create them after that pass presents, without waiting for an unrelated native event.
+        // In particular, their repaint requests cannot resolve a native WindowId until now.
+        self.initialized_all_windows(event_loop)?;
+        Ok(result)
     }
 
     fn has_logical_root(&self) -> bool {
