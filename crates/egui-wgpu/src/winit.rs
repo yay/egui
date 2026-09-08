@@ -672,6 +672,10 @@ impl Painter {
         self.set_native_resize_state(viewport_id, pending.state);
     }
 
+    /// Updates the drawable size, reallocating size-dependent resources only when it changes.
+    ///
+    /// Native move/backing notifications can repeat the same pixel dimensions. Surface recovery
+    /// and presentation-mode changes use their own reconfiguration paths and remain independent.
     pub fn on_window_resized(
         &mut self,
         viewport_id: ViewportId,
@@ -680,7 +684,10 @@ impl Painter {
     ) {
         profiling::function_scope!();
 
-        if self.surfaces.contains_key(&viewport_id) {
+        if let Some(surface) = self.surfaces.get(&viewport_id) {
+            if surface.width == width_in_pixels.get() && surface.height == height_in_pixels.get() {
+                return;
+            }
             self.resize_and_generate_depth_texture_view_and_msaa_view(
                 viewport_id,
                 width_in_pixels,
