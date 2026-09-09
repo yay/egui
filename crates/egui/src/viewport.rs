@@ -1102,6 +1102,14 @@ pub enum ViewportCommand {
     /// immediately before this function is called.
     StartDrag,
 
+    /// Mark an application-controlled window drag, driven by [`Self::OuterPosition`] commands.
+    ///
+    /// Send `true` before moving the carrier and `false` on release, cancellation, or docking.
+    /// This does not move the window or capture the pointer. On macOS it suppresses native frame
+    /// adjustments that can otherwise fight manual movement across displays. Other platforms
+    /// currently ignore this command.
+    AppControlledDrag(bool),
+
     /// Set the outer position of the viewport, i.e. moves the window.
     OuterPosition(Pos2),
 

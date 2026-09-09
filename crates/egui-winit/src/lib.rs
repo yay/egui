@@ -68,6 +68,15 @@ use winit::{
     window::{CursorGrabMode, CustomCursor, Window, WindowButtons, WindowLevel},
 };
 
+/// Temporary opt-in diagnostics, shared with the application and native window trace.
+fn tab_drag_trace_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        cfg!(target_os = "macos")
+            && std::env::var_os("STEADY_TRACE_TAB_DRAG").is_some_and(|value| value == "1")
+    })
+}
+
 pub fn screen_size_in_pixels(window: &Window) -> egui::Vec2 {
     let size = if cfg!(target_os = "ios") {
         // `outer_size` Includes the area behind the "dynamic island".
@@ -292,6 +301,14 @@ impl State {
         let screen_size_in_pixels = screen_size_in_pixels(window);
         let screen_size_in_points =
             screen_size_in_pixels / pixels_per_point(&self.egui_ctx, window);
+        if tab_drag_trace_enabled() {
+            log::info!(
+                target: "steady_drag_trace",
+                "phase=input viewport={:?} window={:?} scale={} zoom={} pixels={:?} points={:?}",
+                self.viewport_id, window.id(), window.scale_factor(), self.egui_ctx.zoom_factor(),
+                screen_size_in_pixels, screen_size_in_points,
+            );
+        }
 
         self.egui_input.screen_rect = (screen_size_in_points.x > 0.0
             && screen_size_in_points.y > 0.0)
@@ -342,6 +359,13 @@ impl State {
 
         match event {
             WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
+                if tab_drag_trace_enabled() {
+                    log::info!(
+                        target: "steady_drag_trace",
+                        "phase=scale_event viewport={:?} window={:?} event={} live={}",
+                        self.viewport_id, window.id(), scale_factor, window.scale_factor(),
+                    );
+                }
                 let native_pixels_per_point = *scale_factor as f32;
 
                 self.egui_input
@@ -1749,6 +1773,27 @@ fn process_viewport_command(
     log::trace!("Processing ViewportCommand::{command:?}");
 
     let pixels_per_point = pixels_per_point(egui_ctx, window);
+    if tab_drag_trace_enabled()
+        && matches!(
+            command,
+            ViewportCommand::OuterPosition(_)
+                | ViewportCommand::InnerSize(_)
+                | ViewportCommand::MinInnerSize(_)
+                | ViewportCommand::MaxInnerSize(_)
+                | ViewportCommand::Maximized(_)
+                | ViewportCommand::Fullscreen(_)
+                | ViewportCommand::StartDrag
+                | ViewportCommand::AppControlledDrag(_)
+                | ViewportCommand::Focus
+                | ViewportCommand::Visible(_)
+        )
+    {
+        log::info!(
+            target: "steady_drag_trace",
+            "phase=command window={:?} ppp={} command={:?} outer={:?} inner_size={:?}",
+            window.id(), pixels_per_point, command, window.outer_position(), window.inner_size(),
+        );
+    }
 
     match command {
         ViewportCommand::Close => {
@@ -1756,6 +1801,15 @@ fn process_viewport_command(
         }
         ViewportCommand::CancelClose => {
             // Need to be handled elsewhere
+        }
+        ViewportCommand::AppControlledDrag(active) => {
+            #[cfg(target_os = "macos")]
+            {
+                use winit::platform::macos::WindowExtMacOS as _;
+                window.set_app_controlled_drag(active);
+            }
+            #[cfg(not(target_os = "macos"))]
+            let _ = active;
         }
         ViewportCommand::StartDrag => {
             // If `.has_focus()` is not checked on x11 the input will be permanently taken until the app is killed!

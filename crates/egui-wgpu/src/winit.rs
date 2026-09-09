@@ -814,6 +814,35 @@ impl Painter {
             size_in_pixels: [surface_state.width, surface_state.height],
             pixels_per_point,
         };
+        // Temporary observation only: compare the drawn surface with the live native view.
+        static TRACE_TAB_DRAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        if *TRACE_TAB_DRAG.get_or_init(|| {
+            cfg!(target_os = "macos")
+                && std::env::var_os("STEADY_TRACE_TAB_DRAG").is_some_and(|value| value == "1")
+        }) {
+            log::info!(
+                target: "steady_drag_trace",
+                concat!("phase=paint viewport={:?} window={:?} ppp={} scale={} ",
+                    "surface={:?} native_size={:?} resize_state={:?}"),
+                viewport_id, window.id(), pixels_per_point, window.scale_factor(),
+                screen_descriptor.size_in_pixels, window.inner_size(),
+                surface_state.native_resize_state,
+            );
+            #[cfg(all(target_os = "macos", feature = "macos-window-resize-jitter-fix"))]
+            // SAFETY: the render callback runs on the main thread and the Metal surface is live.
+            if let Some(surface) =
+                unsafe { surface_state.surface.as_hal::<wgpu::hal::api::Metal>() }
+            {
+                let metal_layer = surface.render_layer().lock();
+                log::info!(
+                    target: "steady_drag_trace",
+                    concat!("phase=metal viewport={:?} bounds={:?} contents_scale={} ",
+                        "drawable={:?} transaction={}"),
+                    viewport_id, metal_layer.bounds(), metal_layer.contentsScale(),
+                    metal_layer.drawableSize(), metal_layer.presentsWithTransaction(),
+                );
+            }
+        }
 
         let user_cmd_bufs = {
             let mut renderer = render_state.renderer.write();
