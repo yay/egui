@@ -1,4 +1,4 @@
-//! Native regression check; run from the egui fork with the sibling Steady winit fork:
+//! Native regression check; run from the egui fork with the sibling tcube winit fork:
 //! ```sh
 //! cargo run -p eframe --release --example windowless_lifecycle --features glow \
 //!   --config 'patch.crates-io.winit.path="../winit"' -- glow
