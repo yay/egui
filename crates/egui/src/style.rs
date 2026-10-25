@@ -512,6 +512,12 @@ pub struct ScrollStyle {
     /// The width of the scroll bars at it largest.
     pub bar_width: f32,
 
+    /// Corner radius for scroll bars and handles, in UI points.
+    ///
+    /// `None` inherits the current widget radius. Large radii are clamped to the
+    /// painted rectangle, so `Some(CornerRadius::same(255))` produces capsule ends.
+    pub corner_radius: Option<CornerRadius>,
+
     /// Make sure the scroll handle is at least this big
     pub handle_min_length: f32,
 
@@ -599,6 +605,7 @@ impl ScrollStyle {
             floating: false,
             content_margin: Margin::ZERO,
             bar_width: 6.0,
+            corner_radius: None,
             handle_min_length: 12.0,
             bar_inner_margin: 4.0,
             bar_outer_margin: 0.0,
@@ -686,6 +693,7 @@ impl ScrollStyle {
             content_margin,
 
             bar_width,
+            corner_radius,
             handle_min_length,
             bar_inner_margin,
             bar_outer_margin,
@@ -719,6 +727,18 @@ impl ScrollStyle {
         ui.horizontal(|ui| {
             ui.add(DragValue::new(bar_width).range(0.0..=32.0));
             ui.label("Full bar width");
+        });
+        ui.horizontal(|ui| {
+            let mut custom_radius = corner_radius.is_some();
+            if ui
+                .checkbox(&mut custom_radius, "Custom corner radius")
+                .changed()
+            {
+                *corner_radius = custom_radius.then_some(CornerRadius::same(255));
+            }
+            if let Some(radius) = corner_radius {
+                ui.add(radius);
+            }
         });
         if *floating {
             ui.horizontal(|ui| {
