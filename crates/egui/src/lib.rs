@@ -455,8 +455,9 @@ pub use emath::{
     remap_clamp, vec2,
 };
 pub use epaint::{
-    ClippedPrimitive, ColorImage, CornerRadius, Direction, ImageData, Margin, Mesh, PaintCallback,
-    PaintCallbackInfo, Shadow, Shape, Stroke, StrokeKind, TextureHandle, TextureId, mutex,
+    ClippedPrimitive, ColorImage, CornerRadius, CornerShape, Direction, ImageData, Margin, Mesh,
+    PaintCallback, PaintCallbackInfo, Shadow, Shape, Stroke, StrokeKind, TextureHandle, TextureId,
+    mutex,
     text::{
         FallbackRequest, FontData, FontDefinitions, FontFamily, FontId, FontInsert, FontPriority,
         FontProvider, FontTweak, GlyphBitmap, GlyphRasterizer, GlyphRasterizerRequest,

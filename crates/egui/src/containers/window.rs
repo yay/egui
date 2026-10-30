@@ -1234,7 +1234,7 @@ fn do_resize_interaction(
 
 /// Fill in parts of the window frame when we resize by dragging that part
 fn paint_frame_interaction(ui: &Ui, rect: Rect, interaction: ResizeInteraction) {
-    use epaint::tessellator::path::add_circle_quadrant;
+    use epaint::tessellator::path::{add_circle_quadrant, add_squircle_quadrant};
 
     let visuals = if interaction.any_dragged() {
         ui.style().visuals.widgets.active
@@ -1257,6 +1257,17 @@ fn paint_frame_interaction(ui: &Ui, rect: Rect, interaction: ResizeInteraction) 
         top = interaction.top.hover;
         bottom = interaction.bottom.hover;
     }
+
+    // The highlight is a path rather than a RectShape, so apply the context default here too.
+    let corner_shape = ui
+        .ctx()
+        .tessellation_options(|options| options.corner_shape);
+    let add_corner_quadrant: fn(&mut Vec<Pos2>, Pos2, f32, usize) = match corner_shape {
+        epaint::CornerShape::Round => |path, center, radius, quadrant| {
+            add_circle_quadrant(path, center, radius, quadrant as f32);
+        },
+        epaint::CornerShape::Squircle => add_squircle_quadrant,
+    };
 
     let cr = CornerRadiusF32::from(ui.visuals().window_corner_radius);
 
@@ -1282,28 +1293,28 @@ fn paint_frame_interaction(ui: &Ui, rect: Rect, interaction: ResizeInteraction) 
     if right && bottom {
         points.push(pos2(max.x, min.y + cr.ne));
         points.push(pos2(max.x, max.y - cr.se));
-        add_circle_quadrant(&mut points, pos2(max.x - cr.se, max.y - cr.se), cr.se, 0.0);
+        add_corner_quadrant(&mut points, pos2(max.x - cr.se, max.y - cr.se), cr.se, 0);
     }
     if bottom {
         points.push(pos2(max.x - cr.se, max.y));
         points.push(pos2(min.x + cr.sw, max.y));
     }
     if left && bottom {
-        add_circle_quadrant(&mut points, pos2(min.x + cr.sw, max.y - cr.sw), cr.sw, 1.0);
+        add_corner_quadrant(&mut points, pos2(min.x + cr.sw, max.y - cr.sw), cr.sw, 1);
     }
     if left {
         points.push(pos2(min.x, max.y - cr.sw));
         points.push(pos2(min.x, min.y + cr.nw));
     }
     if left && top {
-        add_circle_quadrant(&mut points, pos2(min.x + cr.nw, min.y + cr.nw), cr.nw, 2.0);
+        add_corner_quadrant(&mut points, pos2(min.x + cr.nw, min.y + cr.nw), cr.nw, 2);
     }
     if top {
         points.push(pos2(min.x + cr.nw, min.y));
         points.push(pos2(max.x - cr.ne, min.y));
     }
     if right && top {
-        add_circle_quadrant(&mut points, pos2(max.x - cr.ne, min.y + cr.ne), cr.ne, 3.0);
+        add_corner_quadrant(&mut points, pos2(max.x - cr.ne, min.y + cr.ne), cr.ne, 3);
         points.push(pos2(max.x, min.y + cr.ne));
         points.push(pos2(max.x, max.y - cr.se));
     }

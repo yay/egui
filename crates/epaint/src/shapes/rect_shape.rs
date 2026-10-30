@@ -20,6 +20,12 @@ pub struct RectShape {
     /// so the rounding will in this case specify the outer corner radius.
     pub corner_radius: CornerRadius,
 
+    /// Override the curve used for nonzero corner radii.
+    ///
+    /// `None` inherits [`TessellationOptions::corner_shape`]; `Some(...)` overrides it.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub corner_shape: Option<CornerShape>,
+
     /// How to fill the rectangle.
     pub fill: Color32,
 
@@ -85,6 +91,7 @@ impl RectShape {
         Self {
             rect,
             corner_radius: corner_radius.into(),
+            corner_shape: None,
             fill: fill_color.into(),
             stroke: stroke.into(),
             stroke_kind,
@@ -119,6 +126,17 @@ impl RectShape {
     ) -> Self {
         let fill = Color32::TRANSPARENT;
         Self::new(rect, corner_radius, fill, stroke, stroke_kind)
+    }
+
+    /// Override the default corner curve without changing the radii or fill/stroke behavior.
+    ///
+    /// Use [`CornerShape::Squircle`] for convex exponent-four superellipse corners.
+    /// A zero corner radius remains sharp for either shape.
+    #[inline]
+    #[must_use]
+    pub fn with_corner_shape(mut self, corner_shape: CornerShape) -> Self {
+        self.corner_shape = Some(corner_shape);
+        self
     }
 
     /// Set if the stroke is on the inside, outside, or centered on the rectangle.

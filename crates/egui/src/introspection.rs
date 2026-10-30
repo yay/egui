@@ -149,6 +149,7 @@ impl Widget for &mut epaint::TessellationOptions {
                 round_text_to_pixels,
                 round_line_segments_to_pixels,
                 round_rects_to_pixels,
+                corner_shape: _,
                 debug_paint_clip_rects,
                 debug_paint_text_rects,
                 debug_ignore_clip_rects,

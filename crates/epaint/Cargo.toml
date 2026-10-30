@@ -121,3 +121,7 @@ similar-asserts.workspace = true
 [[bench]]
 name = "benchmark"
 harness = false
+
+[[bench]]
+name = "rectangles"
+harness = false

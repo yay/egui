@@ -12,9 +12,9 @@ use emath::{
 
 use crate::{
     BandPoint, BandShape, CircleShape, ClippedPrimitive, ClippedShape, Color32, CornerRadiusF32,
-    CubicBezierShape, EllipseShape, Mesh, PathShape, Primitive, QuadraticBezierShape, RectShape,
-    RoundedRect, Shape, Stroke, StrokeKind, TextShape, TextureId, Vertex, color::ColorMode, emath,
-    stroke::PathStroke, texture_atlas::PreparedDisc,
+    CornerShape, CubicBezierShape, EllipseShape, Mesh, PathShape, Primitive, QuadraticBezierShape,
+    RectShape, RoundedRect, Shape, Stroke, StrokeKind, TextShape, TextureId, Vertex,
+    color::ColorMode, emath, stroke::PathStroke, texture_atlas::PreparedDisc,
 };
 
 // ----------------------------------------------------------------------------
@@ -32,6 +32,76 @@ mod precomputed_vertices {
     // }
 
     use emath::{Vec2, vec2};
+
+    // Unit exponent-four superellipse quadrant, sampled at i * pi / 128.
+    // Coordinates are sqrt(cos(angle)), sqrt(sin(angle)); endpoints are exact.
+    pub const SQUIRCLE_QUADRANT: [Vec2; 65] = [
+        vec2(1.000000, 0.000000),
+        vec2(0.999849, 0.156656),
+        vec2(0.999398, 0.221512),
+        vec2(0.998644, 0.271228),
+        vec2(0.997589, 0.313077),
+        vec2(0.996233, 0.349872),
+        vec2(0.994574, 0.383054),
+        vec2(0.992612, 0.413475),
+        vec2(0.990346, 0.441690),
+        vec2(0.987776, 0.468083),
+        vec2(0.984902, 0.492930),
+        vec2(0.981721, 0.516442),
+        vec2(0.978233, 0.538781),
+        vec2(0.974437, 0.560073),
+        vec2(0.970332, 0.580422),
+        vec2(0.965916, 0.599913),
+        vec2(0.961187, 0.618614),
+        vec2(0.956143, 0.636586),
+        vec2(0.950784, 0.653877),
+        vec2(0.945105, 0.670531),
+        vec2(0.939107, 0.686583),
+        vec2(0.932785, 0.702067),
+        vec2(0.926136, 0.717010),
+        vec2(0.919159, 0.731435),
+        vec2(0.911850, 0.745366),
+        vec2(0.904204, 0.758820),
+        vec2(0.896218, 0.771816),
+        vec2(0.887889, 0.784367),
+        vec2(0.879210, 0.796488),
+        vec2(0.870177, 0.808191),
+        vec2(0.860785, 0.819487),
+        vec2(0.851027, 0.830386),
+        vec2(0.840896, 0.840896),
+        vec2(0.830386, 0.851027),
+        vec2(0.819487, 0.860785),
+        vec2(0.808191, 0.870177),
+        vec2(0.796488, 0.879210),
+        vec2(0.784367, 0.887889),
+        vec2(0.771816, 0.896218),
+        vec2(0.758820, 0.904204),
+        vec2(0.745366, 0.911850),
+        vec2(0.731435, 0.919159),
+        vec2(0.717010, 0.926136),
+        vec2(0.702067, 0.932785),
+        vec2(0.686583, 0.939107),
+        vec2(0.670531, 0.945105),
+        vec2(0.653877, 0.950784),
+        vec2(0.636586, 0.956143),
+        vec2(0.618614, 0.961187),
+        vec2(0.599913, 0.965916),
+        vec2(0.580422, 0.970332),
+        vec2(0.560073, 0.974437),
+        vec2(0.538781, 0.978233),
+        vec2(0.516442, 0.981721),
+        vec2(0.492930, 0.984902),
+        vec2(0.468083, 0.987776),
+        vec2(0.441690, 0.990346),
+        vec2(0.413475, 0.992612),
+        vec2(0.383054, 0.994574),
+        vec2(0.349872, 0.996233),
+        vec2(0.313077, 0.997589),
+        vec2(0.271228, 0.998644),
+        vec2(0.221512, 0.999398),
+        vec2(0.156656, 0.999849),
+        vec2(0.000000, 1.000000),
+    ];
 
     pub const CIRCLE_8: [Vec2; 9] = [
         vec2(1.000000, 0.000000),
@@ -554,6 +624,10 @@ pub mod path {
     use crate::{CornerRadiusF32, RoundedRect};
     use emath::{Pos2, pos2};
 
+    // The minimum radius of curvature of x⁴ + y⁴ = r⁴ occurs at x = y and is
+    // r * 2^(1/4) / 3. Keep inward offsets below that to avoid folded stroke/fill meshes.
+    pub(super) const SQUIRCLE_MIN_CURVATURE: f32 = 0.396_402_4;
+
     /// overwrites existing points
     pub fn rounded_rectangle(path: &mut Vec<Pos2>, rounded_rect: RoundedRect) {
         path.clear();
@@ -599,6 +673,110 @@ pub mod path {
                 path.pop(); // avoid duplicated vertex
             }
         }
+    }
+
+    /// Overwrite `path` with a clockwise convex squircle rectangle.
+    ///
+    /// Radii are clamped by [`RoundedRect`], just as for [`rounded_rectangle`]. Zero radii
+    /// stay sharp, and adjacent arcs share only one endpoint when a straight edge vanishes.
+    /// The existing convex fill/stroke tessellator can consume the resulting outline directly.
+    pub fn squircle_rectangle(path: &mut Vec<Pos2>, rounded_rect: RoundedRect) {
+        squircle_rectangle_with_inset(path, rounded_rect, 0.0);
+    }
+
+    /// Generate an outline whose arcs tolerate the requested inward stroke/feather offset.
+    /// After radius clamping, corners too tight for the inset use the existing circular arc.
+    pub(super) fn squircle_rectangle_with_inset(
+        path: &mut Vec<Pos2>,
+        rounded_rect: RoundedRect,
+        inset: f32,
+    ) {
+        let (rect, cr) = rounded_rect.into_parts();
+        if cr == CornerRadiusF32::ZERO {
+            rounded_rectangle(path, rounded_rect);
+            return;
+        }
+
+        path.clear();
+        let min = rect.min;
+        let max = rect.max;
+        let eps = f32::EPSILON * rect.size().max_elem();
+        let corners = [
+            (
+                pos2(max.x - cr.se, max.y - cr.se),
+                cr.se,
+                cr.sw,
+                rect.width(),
+            ),
+            (
+                pos2(min.x + cr.sw, max.y - cr.sw),
+                cr.sw,
+                cr.nw,
+                rect.height(),
+            ),
+            (
+                pos2(min.x + cr.nw, min.y + cr.nw),
+                cr.nw,
+                cr.ne,
+                rect.width(),
+            ),
+            (
+                pos2(max.x - cr.ne, min.y + cr.ne),
+                cr.ne,
+                cr.se,
+                rect.height(),
+            ),
+        ];
+        for (quadrant, (center, radius, next_radius, side)) in corners.into_iter().enumerate() {
+            if radius * SQUIRCLE_MIN_CURVATURE <= inset {
+                add_circle_quadrant(path, center, radius, quadrant as f32);
+            } else {
+                add_squircle_quadrant(path, center, radius, quadrant);
+            }
+            if side <= radius + next_radius + eps {
+                path.pop(); // The next arc supplies the shared endpoint.
+            }
+        }
+    }
+
+    /// Append an exponent-four arc, including both endpoints, in clockwise order.
+    ///
+    /// `quadrant` is in `0..4`, starting at the bottom right. Nonpositive radii append
+    /// only the center. Subsampling a unit lookup table avoids trigonometry, powers,
+    /// and temporary allocations during tessellation.
+    ///
+    /// # Panics
+    /// Panics if `radius` is positive and `quadrant` is outside `0..4`.
+    pub fn add_squircle_quadrant(path: &mut Vec<Pos2>, center: Pos2, radius: f32, quadrant: usize) {
+        use super::precomputed_vertices::SQUIRCLE_QUADRANT;
+        use emath::vec2;
+
+        if radius <= 0.0 {
+            path.push(center);
+            return;
+        }
+        // As with circular corners, choose resolution from the logical radius.
+        let step = if radius <= 2.0 {
+            16
+        } else if radius <= 5.0 {
+            8
+        } else if radius < 18.0 {
+            4
+        } else if radius < 50.0 {
+            2
+        } else {
+            1
+        };
+        path.extend(SQUIRCLE_QUADRANT.iter().step_by(step).map(|p| {
+            let offset = match quadrant {
+                0 => *p,
+                1 => vec2(-p.y, p.x),
+                2 => -*p,
+                3 => vec2(p.y, -p.x),
+                _ => unreachable!(),
+            };
+            center + radius * offset
+        }));
     }
 
     /// Add one quadrant of a circle
@@ -707,6 +885,14 @@ pub struct TessellationOptions {
     /// You can override this with [`crate::RectShape::round_to_pixels`].
     pub round_rects_to_pixels: bool,
 
+    /// The curve for rounded rectangle corners.
+    ///
+    /// Applies when [`RectShape::corner_shape`] is `None`, including widget backgrounds,
+    /// frames, scrollbars, and shadows. `Some(...)` on a rectangle overrides this option.
+    /// Zero-radius corners remain sharp; circles and arbitrary paths are unaffected.
+    /// Defaults to [`CornerShape::Round`].
+    pub corner_shape: CornerShape,
+
     /// Output the clip rectangles to be painted.
     pub debug_paint_clip_rects: bool,
 
@@ -742,6 +928,7 @@ impl Default for TessellationOptions {
             round_text_to_pixels: true,
             round_line_segments_to_pixels: true,
             round_rects_to_pixels: true,
+            corner_shape: CornerShape::Round,
             debug_paint_text_rects: false,
             debug_paint_clip_rects: false,
             debug_ignore_clip_rects: false,
@@ -1995,7 +2182,26 @@ impl Tessellator {
     ///
     /// * `rect`: the rectangle to tessellate.
     /// * `out`: triangles are appended to this.
+    #[inline]
     pub fn tessellate_rect(&mut self, rect_shape: &RectShape, out: &mut Mesh) {
+        match rect_shape.corner_shape.unwrap_or(self.options.corner_shape) {
+            CornerShape::Round => {
+                self.tessellate_rect_with_corner_shape::<false>(rect_shape, out);
+            }
+            CornerShape::Squircle => {
+                self.tessellate_rect_with_corner_shape::<true>(rect_shape, out);
+            }
+        }
+    }
+
+    /// Append a rectangle using a statically selected outline generator.
+    /// Specialization keeps squircle radius guards and path generation out of the circular hot path.
+    /// Both versions retain the same fill, stroke, texture, rotation, and culling implementation.
+    fn tessellate_rect_with_corner_shape<const SQUIRCLE: bool>(
+        &mut self,
+        rect_shape: &RectShape,
+        out: &mut Mesh,
+    ) {
         if self.options.coarse_tessellation_culling
             && !rect_shape.visual_bounding_rect().intersects(self.clip_rect)
         {
@@ -2006,6 +2212,7 @@ impl Tessellator {
         let RectShape {
             mut rect,
             corner_radius,
+            corner_shape: _,
             mut fill,
             mut stroke,
             mut stroke_kind,
@@ -2147,7 +2354,19 @@ impl Tessellator {
             // We choose the former: if the user asks for _any_ corner_radius, they should get it.
 
             let min_inside_cr = 0.1; // Large enough to avoid numerical issues
-            let min_outside_cr = stroke.width + min_inside_cr;
+            let min_outside_cr = if SQUIRCLE {
+                let squircle_radius = (stroke.width + 0.5 * self.feathering)
+                    / path::SQUIRCLE_MIN_CURVATURE
+                    + min_inside_cr;
+                if squircle_radius <= 0.5 * rect.size().min_elem() {
+                    squircle_radius
+                } else {
+                    // Include the feather inset when falling back to circular arcs.
+                    stroke.width + 0.5 * self.feathering + min_inside_cr
+                }
+            } else {
+                stroke.width + min_inside_cr
+            };
 
             let extra_cr_tweak = 0.4; // Otherwise is doesn't _feels_  enough.
 
@@ -2179,10 +2398,16 @@ impl Tessellator {
 
         let path = &mut self.scratchpad_path;
         path.clear();
-        path::rounded_rectangle(
-            &mut self.scratchpad_points,
-            RoundedRect::new(rect, corner_radius),
-        );
+        let rounded_rect = RoundedRect::new(rect, corner_radius);
+        if SQUIRCLE {
+            path::squircle_rectangle_with_inset(
+                &mut self.scratchpad_points,
+                rounded_rect,
+                stroke.width + 0.5 * self.feathering,
+            );
+        } else {
+            path::rounded_rectangle(&mut self.scratchpad_points, rounded_rect);
+        }
 
         // Apply rotation if angle is non-zero
         if angle != 0.0 {

@@ -73,6 +73,7 @@ pub fn adjust_colors(
         | Shape::Rect(RectShape {
             rect: _,
             corner_radius: _,
+            corner_shape: _,
             fill,
             stroke,
             stroke_kind: _,

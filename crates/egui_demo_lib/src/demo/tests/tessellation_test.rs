@@ -296,6 +296,7 @@ fn rect_shape_ui(ui: &mut egui::Ui, shape: &mut RectShape) {
     let RectShape {
         rect,
         corner_radius,
+        corner_shape: _,
         fill,
         stroke,
         stroke_kind,
