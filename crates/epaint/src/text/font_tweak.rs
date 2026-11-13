@@ -51,6 +51,7 @@ pub struct FontTweak {
     ///
     /// For example, `(*b"tnum", 1)` enables tabular figures. Zero disables a feature.
     /// Empty uses shaping defaults. Later duplicate tags take precedence.
+    /// A [`TextFormat`](super::TextFormat) can override these defaults for a section.
     #[cfg_attr(feature = "serde", serde(default))]
     pub features: Vec<([u8; 4], u32)>,
 

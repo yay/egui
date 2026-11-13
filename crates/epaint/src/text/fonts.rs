@@ -8,7 +8,7 @@ use crate::{
         TextOptions, VariationCoords,
         face_store::{FaceStore, FontFaceKey},
         family::{Family, FamilyKey},
-        font_face::{FontFace, GlyphInfo, ShapedGlyph},
+        font_face::{FontFace, GlyphIdResolution, GlyphInfo, ShapedGlyph},
         font_provider::FontProviders,
         galley_cache::GalleyCache,
         glyph_atlas::{GlyphAllocation, GlyphAtlas, OutlineGlyph, RasterGlyphAllocation},
@@ -350,6 +350,9 @@ impl FontsView<'_> {
     }
 
     /// Width of this character in points.
+    ///
+    /// Uses the font's configured features. For section overrides or
+    /// contextual shaping, measure the corresponding layout job instead.
     ///
     /// If the font doesn't exist, this will return `0.0`.
     pub fn glyph_width(&mut self, font_id: &FontId, c: char) -> f32 {
@@ -702,6 +705,10 @@ impl FontsImpl {
         if !face.tweak().features.is_empty()
             && !c.is_control()
             && !matches!(c, '\u{2009}' | '\u{202F}')
+            && matches!(
+                face.glyph_id_resolution(c),
+                Some(GlyphIdResolution::Glyph(_))
+            )
         {
             let advance = face.shaped_advance_width_unscaled(c);
             return advance as f32 * metrics.px_scale_factor;

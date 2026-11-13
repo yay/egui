@@ -1,6 +1,6 @@
 use alloc::{borrow::Cow, sync::Arc};
 use core::fmt::Formatter;
-use epaint::text::{IntoTag, TextFormat, VariationCoords};
+use epaint::text::{IntoTag, OpenTypeFeature, TextFormat, VariationCoords};
 
 use crate::{
     Align, Color32, FontFamily, FontSelection, Galley, Style, TextStyle, TextWrapMode, Ui, Visuals,
@@ -34,6 +34,7 @@ pub struct RichText {
     expand_bg: f32,
     text_color: Option<Color32>,
     coords: VariationCoords,
+    font_features: Vec<OpenTypeFeature>,
     code: bool,
     strong: bool,
     weak: bool,
@@ -56,6 +57,7 @@ impl Default for RichText {
             expand_bg: 1.0,
             text_color: Default::default(),
             coords: Default::default(),
+            font_features: Default::default(),
             code: Default::default(),
             strong: Default::default(),
             weak: Default::default(),
@@ -211,6 +213,29 @@ impl RichText {
         variations: impl IntoIterator<Item = (T, f32)>,
     ) -> Self {
         self.coords = VariationCoords::new(variations);
+        self
+    }
+
+    /// Set the OpenType feature overrides for this text.
+    ///
+    /// Values of zero disable a feature and values of one enable it. Some
+    /// features use other values to select among alternates. The font must
+    /// support the requested features. These settings override per-font
+    /// features with the same tag.
+    ///
+    /// ```
+    /// # use egui::RichText;
+    /// let timecode = RichText::new("12:34.567").font_features([("tnum", 1)]);
+    /// ```
+    #[inline]
+    pub fn font_features<T: IntoTag>(
+        mut self,
+        features: impl IntoIterator<Item = (T, u32)>,
+    ) -> Self {
+        self.font_features = features
+            .into_iter()
+            .map(|(tag, value)| OpenTypeFeature::new(tag, value))
+            .collect();
         self
     }
 
@@ -430,6 +455,7 @@ impl RichText {
             expand_bg,
             text_color: _, // already used by `get_text_color`
             coords,
+            font_features,
             code,
             strong: _, // already used by `get_text_color`
             weak: _,   // already used by `get_text_color`
@@ -502,6 +528,7 @@ impl RichText {
                 background_margin,
                 background_corner_radius,
                 coords,
+                font_features,
                 italics,
                 underline,
                 strikethrough,
@@ -1002,6 +1029,61 @@ mod tests {
         let text = text.color(Color32::BLUE);
         assert_eq!(text.color_override(), Some(Color32::BLUE));
         assert_eq!(text.text(), "Hello");
+    }
+
+    #[test]
+    fn rich_text_carries_opentype_features_into_layout() {
+        let text = RichText::new("12:34").font_features([("tnum", 1), ("liga", 0)]);
+        let job = WidgetText::from(text).into_layout_job(
+            &crate::Style::default(),
+            crate::FontSelection::Default,
+            crate::Align::BOTTOM,
+        );
+        assert_eq!(
+            job.sections[0].format.font_features,
+            [
+                crate::text::OpenTypeFeature::new("tnum", 1),
+                crate::text::OpenTypeFeature::new("liga", 0),
+            ]
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "default_fonts")]
+    fn replacing_font_features_invalidates_cached_widths_and_layouts() {
+        let mut proportional = crate::FontDefinitions::default();
+        let primary = proportional.families[&crate::FontFamily::Proportional][0].clone();
+        std::sync::Arc::make_mut(proportional.font_data.get_mut(&primary).unwrap())
+            .tweak
+            .features = vec![(*b"pnum", 1)];
+        let mut tabular = proportional.clone();
+        std::sync::Arc::make_mut(tabular.font_data.get_mut(&primary).unwrap())
+            .tweak
+            .features = vec![(*b"tnum", 1)];
+
+        let ctx = crate::Context::default();
+        let measure = |definitions| {
+            ctx.set_fonts(definitions);
+            let mut result = None;
+            ctx.run_pass(Default::default(), |ctx| {
+                result = Some(ctx.fonts_mut(|fonts| {
+                    let id = crate::FontId::proportional(24.0);
+                    let widths = [fonts.glyph_width(&id, '0'), fonts.glyph_width(&id, '1')];
+                    let galley = fonts.layout_no_wrap("01".to_owned(), id, Color32::WHITE);
+                    (widths, galley)
+                }));
+            })
+            .drop_without_applying_deltas();
+            result.unwrap()
+        };
+        let (original, original_layout) = measure(proportional.clone());
+        let (fixed, fixed_layout) = measure(tabular);
+        let (restored, restored_layout) = measure(proportional);
+        assert_ne!(original[0], original[1]);
+        assert_eq!(fixed[0], fixed[1]);
+        assert_eq!(restored, original);
+        assert_ne!(original_layout.size().x, fixed_layout.size().x);
+        assert_eq!(restored_layout.size(), original_layout.size());
     }
 
     #[test]

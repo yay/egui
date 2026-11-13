@@ -19,8 +19,8 @@ use crate::{
 };
 
 use super::{
-    ByteRangeExt as _, Galley, Glyph, LayoutJob, LayoutSection, PlacedRow, Row, RowVisuals,
-    TextFormat, VariationCoords,
+    ByteRangeExt as _, Galley, Glyph, LayoutJob, LayoutSection, OpenTypeFeature, PlacedRow, Row,
+    RowVisuals, TextFormat, VariationCoords,
     family::FamilyKey,
     font_face::{FontFace, GlyphInfo, ShapedGlyph},
     glyph_atlas::{GlyphAllocation, OutlineGlyph, RasterGlyphAllocation},
@@ -599,7 +599,14 @@ fn layout_section(
                 flags |= harfrust::BufferFlags::END_OF_TEXT;
             }
 
-            shape_text(font_face, run_text, &format.coords, shape_buffer, flags);
+            shape_text(
+                font_face,
+                run_text,
+                &format.coords,
+                &format.font_features,
+                shape_buffer,
+                flags,
+            );
 
             layout_shaped_run(
                 fonts,
@@ -1603,6 +1610,7 @@ pub(super) fn shape_text(
     font_face: &FontFace,
     text: &str,
     coords: &VariationCoords,
+    section_features: &[OpenTypeFeature],
     buffer: &mut harfrust::Buffer,
     flags: harfrust::BufferFlags,
 ) {
@@ -1622,11 +1630,15 @@ pub(super) fn shape_text(
     buffer.push_str(text);
     buffer.guess_segment_properties();
 
-    let features: Vec<_> = tweak
+    let font_features = tweak
         .features
         .iter()
-        .map(|(tag, value)| harfrust::Feature::new(crate::text::Tag::new(tag), *value, ..))
-        .collect();
+        .map(|(tag, value)| harfrust::Feature::new(crate::text::Tag::new(tag), *value, ..));
+    let section_features = section_features
+        .iter()
+        .map(|feature| harfrust::Feature::new(feature.tag, feature.value, ..));
+    // Later settings override earlier ones for the same tag.
+    let features: Vec<_> = iter::chain(font_features, section_features).collect();
     let options = harfrust::ShapeOptions::new().features(&features);
     let shaper_font = harfrust::ShaperFont::new(font);
     if let Err(err) = harfrust::shape(&shaper_font, buffer, options) {
@@ -1645,6 +1657,120 @@ mod tests {
 
     fn test_fonts() -> FontsImpl {
         FontsImpl::new(TextOptions::default(), FontDefinitions::default())
+    }
+
+    #[test]
+    fn opentype_font_features_match_digit_widths_and_keep_faces_separate() {
+        let mut definitions = FontDefinitions::empty();
+        let font = FontData::from_static(include_bytes!("../../tests/data/InterDigits.ttf"));
+        let mut add_face = |name: &str, features| {
+            let mut data = font.clone();
+            data.tweak.features = features;
+            let family = FontFamily::Name(name.into());
+            definitions
+                .font_data
+                .insert(name.to_owned(), Arc::new(data));
+            definitions
+                .families
+                .insert(family.clone(), vec![name.to_owned()]);
+            FontId::new(24.0, family)
+        };
+        let proportional = add_face("proportional digits", vec![]);
+        let tabular = add_face("tabular digits", vec![(*b"tnum", 1)]);
+        let unknown = add_face("unsupported feature", vec![(*b"ZZZZ", 1)]);
+        let mut fonts = Fonts::new(TextOptions::default(), definitions);
+        let mut fonts = fonts.with_pixels_per_point(1.0);
+        let digits = "0123456789";
+        let mut measure = |font_id: &FontId, features| {
+            let galley = fonts.layout_job(LayoutJob::simple_format(
+                digits.to_owned(),
+                TextFormat {
+                    font_id: font_id.clone(),
+                    font_features: features,
+                    ..Default::default()
+                },
+            ));
+            galley.rows[0]
+                .glyphs
+                .iter()
+                .map(|g| g.advance_width)
+                .collect::<Vec<_>>()
+        };
+        let original = measure(&proportional, vec![]);
+        let fixed = measure(&tabular, vec![]);
+        assert_ne!(original[0], original[1]);
+        assert_eq!(fixed.len(), digits.len());
+        assert!(fixed.iter().all(|&width| width > 0.0 && width == fixed[0]));
+        assert_eq!(measure(&unknown, vec![]), original);
+        assert_eq!(
+            measure(&tabular, vec![OpenTypeFeature::new("tnum", 0)]),
+            original
+        );
+        assert_eq!(
+            measure(&proportional, vec![OpenTypeFeature::new("tnum", 1)]),
+            fixed
+        );
+
+        for (i, digit) in digits.chars().enumerate() {
+            let glyph_width = fonts.glyph_width(&tabular, digit);
+            let single = fonts.layout_no_wrap(digit.to_string(), tabular.clone(), Color32::WHITE);
+            assert!((glyph_width - single.rows[0].glyphs[0].advance_width).abs() < 0.001);
+            assert!((glyph_width - fixed[i]).abs() < 0.001);
+            assert!((fonts.glyph_width(&proportional, digit) - original[i]).abs() < 0.001);
+            assert_eq!(fonts.glyph_width(&tabular, digit), glyph_width);
+        }
+        assert_eq!(fonts.glyph_width(&tabular, '\u{10ffff}'), 0.0);
+    }
+
+    #[test]
+    #[cfg(feature = "default_fonts")]
+    fn opentype_features_select_tabular_figures_per_section() {
+        let format = |tag| TextFormat {
+            font_id: FontId::proportional(24.0),
+            font_features: vec![OpenTypeFeature::new(tag, 1)],
+            ..Default::default()
+        };
+        let mut job = LayoutJob::default();
+        job.append("10", 0.0, format("pnum"));
+        job.append("10", 0.0, format("tnum"));
+        job.append("10", 0.0, format("pnum"));
+
+        // The bundled Ubuntu font supports both proportional and tabular figures.
+        let mut fonts = Fonts::new(TextOptions::default(), FontDefinitions::default());
+        let mut fonts = fonts.with_pixels_per_point(1.0);
+        let galley = fonts.layout_job(job);
+        let glyphs = &galley.rows[0].glyphs;
+        assert_eq!(glyphs.len(), 6);
+        assert_ne!(glyphs[0].advance_width, glyphs[1].advance_width);
+        assert_eq!(glyphs[2].advance_width, glyphs[3].advance_width);
+        assert_eq!(glyphs[0].advance_width, glyphs[4].advance_width);
+        assert_eq!(glyphs[1].advance_width, glyphs[5].advance_width);
+    }
+
+    #[test]
+    #[cfg(feature = "default_fonts")]
+    fn opentype_features_can_disable_ligatures_and_distinguish_cached_layouts() {
+        let job = |font_features| {
+            LayoutJob::simple_format(
+                "fi".to_owned(),
+                TextFormat {
+                    font_id: FontId::proportional(24.0),
+                    font_features,
+                    ..Default::default()
+                },
+            )
+        };
+        let mut fonts = Fonts::new(TextOptions::default(), FontDefinitions::default());
+        let mut fonts = fonts.with_pixels_per_point(1.0);
+        let defaults = fonts.layout_job(job(vec![]));
+        let disabled_job = job(vec![OpenTypeFeature::new("liga", 0)]);
+        let disabled = fonts.layout_job(disabled_job.clone());
+        assert!(!Arc::ptr_eq(&defaults, &disabled));
+        assert!(Arc::ptr_eq(&disabled, &fonts.layout_job(disabled_job)));
+        assert_eq!(defaults.rows[0].glyphs.len(), 2);
+        assert_eq!(disabled.rows[0].glyphs.len(), 2);
+        assert_eq!(defaults.rows[0].glyphs[1].advance_width, 0.0);
+        assert!(disabled.rows[0].glyphs[1].advance_width > 0.0);
     }
 
     fn layout_without_fonts(text: &str, policy: MissingGlyphPolicy) -> Arc<Galley> {

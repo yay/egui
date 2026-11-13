@@ -559,8 +559,9 @@ impl FontFace {
             self,
             c.encode_utf8(&mut utf8),
             &VariationCoords::default(),
+            &[],
             &mut buffer,
-            harfrust::BufferFlags::empty(),
+            harfrust::BufferFlags::BEGINNING_OF_TEXT | harfrust::BufferFlags::END_OF_TEXT,
         );
         let advance = buffer.glyph_positions().iter().map(|p| p.x_advance).sum();
         self.shaped_advance_width_cache.insert(c, advance);
