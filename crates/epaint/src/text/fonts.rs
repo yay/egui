@@ -351,6 +351,9 @@ impl FontsView<'_> {
 
     /// Width of this character in points.
     ///
+    /// Uses the font's configured features. For section overrides or
+    /// contextual shaping, measure the corresponding layout job instead.
+    ///
     /// If the font doesn't exist, this will return `0.0`.
     pub fn glyph_width(&mut self, font_id: &FontId, c: char) -> f32 {
         self.fonts.glyph_width(&font_id.family, c, font_id.size)

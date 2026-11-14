@@ -393,21 +393,21 @@ impl IntoTag for u32 {
 impl IntoTag for [u8; 4] {
     #[inline(always)]
     fn into_tag(self) -> font_types::Tag {
-        font_types::Tag::new_checked(&self).expect("Invalid variation axis tag")
+        font_types::Tag::new_checked(&self).expect("Invalid OpenType tag")
     }
 }
 
 impl IntoTag for &[u8; 4] {
     #[inline(always)]
     fn into_tag(self) -> font_types::Tag {
-        font_types::Tag::new_checked(self).expect("Invalid variation axis tag")
+        font_types::Tag::new_checked(self).expect("Invalid OpenType tag")
     }
 }
 
 impl IntoTag for &str {
     #[inline(always)]
     fn into_tag(self) -> font_types::Tag {
-        font_types::Tag::from_str(self).expect("Invalid variation axis tag")
+        font_types::Tag::from_str(self).expect("Invalid OpenType tag")
     }
 }
 
@@ -472,6 +472,30 @@ impl core::hash::Hash for VariationCoords {
     }
 }
 
+/// An OpenType feature override for a section of text.
+///
+/// For example, `OpenTypeFeature::new("tnum", 1)` requests tabular figures.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
+pub struct OpenTypeFeature {
+    /// The four-byte OpenType feature tag.
+    pub tag: font_types::Tag,
+
+    /// Zero disables the feature. One enables it, and some features support
+    /// other values to select among alternates.
+    pub value: u32,
+}
+
+impl OpenTypeFeature {
+    /// Set a feature by its OpenType tag and value.
+    pub fn new(tag: impl IntoTag, value: u32) -> Self {
+        Self {
+            tag: tag.into_tag(),
+            value,
+        }
+    }
+}
+
 /// Formatting option for a section of text.
 #[derive(Clone, Debug, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
@@ -529,6 +553,13 @@ pub struct TextFormat {
 
     pub coords: VariationCoords,
 
+    /// OpenType feature overrides for this section, applied by the text shaper.
+    ///
+    /// These override the selected font's [`FontTweak::features`](super::FontTweak::features).
+    /// An empty list inherits the font's settings. Unsupported features have no effect.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub font_features: Vec<OpenTypeFeature>,
+
     pub italics: bool,
 
     pub underline: Stroke,
@@ -567,6 +598,7 @@ impl Default for TextFormat {
             background_margin: Margin::ZERO,
             background_corner_radius: CornerRadius::ZERO,
             coords: VariationCoords::default(),
+            font_features: Vec::new(),
             italics: false,
             underline: Stroke::NONE,
             strikethrough: Stroke::NONE,
@@ -588,6 +620,7 @@ impl core::hash::Hash for TextFormat {
             background_margin,
             background_corner_radius,
             coords,
+            font_features,
             italics,
             underline,
             strikethrough,
@@ -604,6 +637,7 @@ impl core::hash::Hash for TextFormat {
         background_margin.hash(state);
         background_corner_radius.hash(state);
         coords.hash(state);
+        font_features.hash(state);
         italics.hash(state);
         underline.hash(state);
         strikethrough.hash(state);
